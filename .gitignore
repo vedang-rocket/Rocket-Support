@@ -1,7 +1,13 @@
+# Python cache
 engine/.venv/
 engine/__pycache__/
 engine/kb/__pycache__/
 *.pyc
-.DS_Store
+
+# Generated/runtime files
 logs/
-cursor-rules-v34/
+kb/kb_index.pkl
+.DS_Store
+
+# Sensitive
+.rocket-support/
