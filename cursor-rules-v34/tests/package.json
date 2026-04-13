@@ -1,0 +1,15 @@
+{
+  "name": "rocket-cursor-rules-tests",
+  "version": "32.0.0",
+  "description": "Test suite for Rocket Cursor Rules V32",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --reporter=verbose",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0",
+    "@vitest/coverage-v8": "^2.0.0"
+  }
+}

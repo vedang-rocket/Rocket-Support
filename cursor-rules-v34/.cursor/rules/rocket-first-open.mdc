@@ -1,0 +1,154 @@
+---
+description: >
+  opening a new project for the first time, just received this project, new user project,
+  where do I start, first time seeing this code, just downloaded the zip, starting fresh
+  on this project, how to begin, what to do first, new codebase never seen before,
+  project just arrived from user, starting point checklist, onboarding a new project
+globs: []
+alwaysApply: false
+---
+
+# Rocket.new — New Project Opening Protocol
+
+> Every time you open a project you have never worked on before, follow this sequence.
+> Do NOT start fixing code until Phase 1 is complete.
+> The 5 minutes this takes saves hours of fixing the wrong thing.
+
+---
+
+## THE RULE
+
+**Never touch code in a new project without running `/audit-codebase` first.**
+
+Skipping the audit means:
+- Fixing symptoms instead of root causes
+- Missing the getSession() call that breaks everything 3 steps later
+- Writing fixes for tables that don't exist yet
+- Spending 20 minutes on an auth fix when the real issue is a missing migration
+
+---
+
+## Phase 0 — Identify Project Type (30 seconds)
+
+Before anything else, identify what kind of project this is.
+
+```bash
+# Check package.json for key integrations
+cat package.json | grep -E '"stripe|openai|anthropic|resend|twilio|calendly"'
+# Check what API routes exist
+find ./app/api -name "route.ts" 2>/dev/null | sort
+```
+
+State the project type before proceeding: "This is a **TYPE A — SaaS App**" or equivalent.
+See `rocket-project-types.mdc` for the full detection guide.
+
+---
+
+## Phase 1 — Environment Check (1 minute)
+
+```bash
+# 1. What are we working with?
+cat package.json | grep '"name"\|"version"'
+
+# 2. Are env vars present?
+ls .env.local && echo "✅ .env.local exists" || echo "❌ MISSING — ask user for credentials"
+
+# 3. Quick red flag scan
+grep -rn "getSession()" ./app ./lib ./middleware.ts 2>/dev/null | wc -l | xargs echo "getSession() count:"
+ls middleware.ts 2>/dev/null && echo "✅ middleware at root" || echo "❌ middleware MISSING"
+```
+
+---
+
+## Phase 1.5 — Load Full Context (30 seconds)
+
+```
+/load-context
+```
+
+This generates the complete project briefing: what the app does, database state via MCP,
+previous session memory, and relevant learned patterns. Replaces 10 minutes of manual reading.
+
+---
+
+## Phase 2 — Run the Full Audit (2-3 Minutes)
+
+```
+/audit-codebase
+```
+
+Do NOT proceed until the audit report is complete and reviewed.
+Read the CRITICAL section of the report first. Those are the issues that will break your fixes if ignored.
+
+---
+
+## Phase 3 — Run Security Audit (Optional but Recommended)
+
+For projects going to production or with Stripe/auth issues:
+```
+/security-audit
+```
+
+---
+
+## Phase 4 — Make Codebase Legible (If Many Files Missing Headers)
+
+If the audit found 5+ files missing headers:
+```
+/make-legible
+```
+
+This improves every subsequent fix in the session.
+
+---
+
+## Phase 5 — Load Memory Context
+
+If Memory MCP is connected:
+```
+search_nodes: "[project folder name]"
+```
+
+If this returns results → read them before starting work. Previous sessions documented what was tried.
+If no results → this is the first session. Proceed.
+
+If MCP not connected → read `memory-bank/project-context.md` and `memory-bank/active-issues.md`.
+
+---
+
+## Phase 6 — Orient Before Acting
+
+Before writing a single fix prompt, answer these 3 questions:
+
+```
+1. What is the user's reported problem?
+   (what they said is broken — not what the audit found)
+
+2. What does the audit say is the most likely root cause?
+   (audit findings vs user's description)
+
+3. What is the safest first fix?
+   (fix the deepest root cause first — not the most visible symptom)
+```
+
+Only after answering these 3: open a fresh chat, use the appropriate command (`/fix-auth`, `/fix-database`, etc.) and begin.
+
+---
+
+## The Mental Model
+
+Think of each new project as a patient arriving at a clinic.
+
+You do not prescribe before you diagnose.
+You do not diagnose from the patient's self-report alone.
+You run the tests, read the results, then treat.
+
+`/audit-codebase` is the blood test. The audit report is the diagnosis. The fix commands are the treatment.
+
+---
+
+## CRITICAL — REPEATED AT BOTTOM
+
+**Never skip the audit on a new project.**
+The 5 minutes it takes is the best investment of every session.
+The developers who skip it spend 30 minutes fixing the wrong thing.

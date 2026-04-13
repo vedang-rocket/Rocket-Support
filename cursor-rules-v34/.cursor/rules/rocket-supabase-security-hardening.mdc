@@ -1,0 +1,380 @@
+---
+description: >
+  supabase data API security hardening PostgREST, disable supabase REST API public schema,
+  supabase table exposed publicly security risk, PostgREST rate limiting pre-request,
+  supabase custom schema api not public, auto enable RLS all tables supabase,
+  hardening supabase PostgREST endpoints, supabase API abuse too many requests,
+  restrict table access PostgREST GRANT REVOKE, supabase security misconfiguration fix,
+  supabase data api disable custom schema, GRANT anon authenticated PostgREST,
+  supabase prevent data extraction unauthorized, pgrst.db_pre_request rate limit function
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase — Data API Security Hardening
+
+> CRITICAL: Supabase's 2025 security retrospective documented mass data breaches caused
+> by PostgREST auto-exposing tables with RLS disabled. Run the Security Advisor FIRST.
+> Supabase Dashboard → Advisors → Security Advisor → fix every item flagged.
+
+---
+
+## What PostgREST Exposes By Default
+
+Every Supabase project gets an auto-generated REST API (PostgREST) that exposes ALL tables
+and views in the `public` schema. Anyone with your anon key can query them.
+
+```
+https://[PROJECT_REF].supabase.co/rest/v1/[table_name]
+```
+
+**This is not a bug — it is the design.** RLS policies are what control access.
+The problem: if RLS is off or policies are wrong, the table is fully public.
+
+---
+
+## Step 1 — Auto-Enable RLS on ALL Tables (run immediately)
+
+```sql
+-- Find every table in public schema without RLS enabled
+SELECT schemaname, tablename
+FROM pg_tables
+WHERE schemaname = 'public'
+  AND tablename NOT IN (
+    SELECT relname FROM pg_class
+    WHERE relrowsecurity = true AND relnamespace = 'public'::regnamespace
+  );
+
+-- Enable RLS on all of them at once
+DO $$
+DECLARE
+  t RECORD;
+BEGIN
+  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t.tablename);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', t.tablename);
+  END LOOP;
+END;
+$$;
+```
+
+**FORCE ROW LEVEL SECURITY** — makes RLS apply even to the table owner (postgres role).
+Without this, the postgres role (used by migrations and direct connections) bypasses RLS silently.
+
+---
+
+## Step 2 — Event Trigger: Auto-Enable RLS on New Tables
+
+This trigger fires every time a new table is created — ensures no table is ever created without RLS.
+
+```sql
+CREATE OR REPLACE FUNCTION auto_enable_rls()
+RETURNS event_trigger LANGUAGE plpgsql AS $$
+DECLARE
+  obj RECORD;
+BEGIN
+  FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+    WHERE command_tag = 'CREATE TABLE' AND schema_name = 'public'
+  LOOP
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', obj.object_identity);
+  END LOOP;
+END;
+$$;
+
+CREATE EVENT TRIGGER enforce_rls_on_create
+  ON ddl_command_end
+  WHEN TAG IN ('CREATE TABLE')
+  EXECUTE FUNCTION auto_enable_rls();
+```
+
+---
+
+## ⚠️ RLS Enabled + No Policies = Silent Empty Results
+
+This is the most confusing Rocket bug: "my data disappeared after I enabled RLS."
+
+```
+When RLS is enabled on a table BUT no policies exist:
+  - supabase-js returns { data: [], error: null }
+  - NO error, NO 403, NO permission denied
+  - Data appears to have vanished — queries just return empty
+
+This is intentional PostgreSQL behavior: default-deny means no rows pass.
+```
+
+```sql
+-- Find tables with RLS enabled but ZERO policies (default-deny = nothing returns)
+SELECT c.relname AS table_name
+FROM pg_class c
+WHERE c.relrowsecurity = true
+  AND c.relnamespace = 'public'::regnamespace
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_policies p
+    WHERE p.tablename = c.relname AND p.schemaname = 'public'
+  );
+-- If this returns rows: add policies OR disable RLS until policies are ready
+-- An empty result here = every table with RLS also has at least one policy ✅
+```
+
+---
+
+## Step 3 — Restrict GRANT Permissions
+
+By default, `anon` and `authenticated` can SELECT from all public tables (if RLS allows).
+For sensitive tables, restrict at the GRANT level too — double protection.
+
+```sql
+-- Revoke all access from anon and authenticated on sensitive table
+REVOKE ALL ON TABLE public.user_roles FROM anon, authenticated;
+REVOKE ALL ON TABLE public.audit_log  FROM anon, authenticated;
+REVOKE ALL ON TABLE public.api_keys   FROM anon, authenticated;
+
+-- Grant only what is needed
+GRANT SELECT ON TABLE public.products  TO anon;         -- public catalog, read-only
+GRANT SELECT, INSERT, UPDATE ON TABLE public.orders TO authenticated;  -- logged-in users
+
+-- Verify current grants
+SELECT grantee, privilege_type, table_name
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+  AND grantee IN ('anon', 'authenticated')
+ORDER BY table_name, grantee;
+```
+
+---
+
+## RLS Default Behavior — Dashboard vs SQL vs Migrations
+
+```
+Dashboard table creation (2025):
+  ✅ RLS is ENABLED by default when creating tables via Table Editor
+  ✅ But: no policies are created — table is inaccessible until you add policies
+
+SQL Editor / migrations:
+  ❌ RLS is NOT enabled by default
+  ❌ You must run: ALTER TABLE tablename ENABLE ROW LEVEL SECURITY;
+
+External tools (Prisma migrations, Drizzle push, psql):
+  ❌ RLS is NOT enabled by default
+  ❌ The auto-RLS event trigger (Step 2 above) handles this automatically
+
+Rule: always use the event trigger (Step 2) AND run the bulk enable (Step 1)
+      so that ALL tables regardless of how they were created have RLS.
+```
+
+---
+
+## Step 4 — Rate Limiting via PostgREST pre-request Hook
+
+PostgREST supports a pre-request function that runs before every API request.
+Use it to implement rate limiting without any middleware.
+
+```sql
+-- 1. Create a private schema for rate limiting (never exposed via PostgREST)
+CREATE SCHEMA IF NOT EXISTS private;
+
+-- 2. Create rate limit tracking table
+CREATE TABLE IF NOT EXISTS private.rate_limits (
+  ip          TEXT NOT NULL,
+  endpoint    TEXT NOT NULL DEFAULT 'api',
+  window_start TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', NOW()),
+  request_count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (ip, endpoint, window_start)
+);
+
+-- 3. Create the pre-request function
+CREATE OR REPLACE FUNCTION private.check_rate_limit()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_ip       TEXT := current_setting('request.headers', true)::json->>'x-forwarded-for';
+  v_count    INTEGER;
+  v_limit    INTEGER := 100;  -- requests per minute per IP
+BEGIN
+  IF v_ip IS NULL OR v_ip = '' THEN RETURN; END IF;
+
+  INSERT INTO private.rate_limits(ip, window_start, request_count)
+  VALUES (v_ip, date_trunc('minute', NOW()), 1)
+  ON CONFLICT (ip, endpoint, window_start)
+  DO UPDATE SET request_count = private.rate_limits.request_count + 1
+  RETURNING request_count INTO v_count;
+
+  IF v_count > v_limit THEN
+    RAISE EXCEPTION 'Rate limit exceeded'
+      USING HINT = 'Too many requests', ERRCODE = 'P0001';
+  END IF;
+END;
+$$;
+
+-- 4. Register as PostgREST pre-request (run in SQL Editor)
+ALTER ROLE authenticator SET pgrst.db_pre_request = 'private.check_rate_limit';
+
+-- 5. Reload PostgREST config
+NOTIFY pgrst, 'reload config';
+
+-- 6. Clean up old rate limit windows (add to pg_cron)
+SELECT cron.schedule('cleanup-rate-limits', '*/5 * * * *', $$
+  DELETE FROM private.rate_limits WHERE window_start < NOW() - INTERVAL '5 minutes';
+$$);
+```
+
+---
+
+## Step 5 — Move Sensitive Tables to Private Schema (Optional — Maximum Security)
+
+For tables that should NEVER be accessible via the REST API:
+
+```sql
+-- Create a private schema (PostgREST only exposes schemas explicitly listed)
+CREATE SCHEMA IF NOT EXISTS private;
+
+-- Move table to private schema
+ALTER TABLE public.api_keys SET SCHEMA private;
+ALTER TABLE public.webhook_secrets SET SCHEMA private;
+
+-- These tables now have NO REST API endpoint whatsoever
+-- Access them only from server-side code with service_role or from DB functions
+```
+
+```
+Supabase Dashboard → Settings → API → Exposed schemas
+Default: public
+Only schemas listed here are exposed via PostgREST
+Remove 'public' and add a clean 'api' schema for complete control (advanced)
+```
+
+---
+
+## Step 6 — Disable the GraphQL API (if not using it)
+
+pg_graphql is enabled by default and exposes a `/graphql/v1` endpoint.
+If you are not using GraphQL, disable it:
+
+```
+Supabase Dashboard → Database → Extensions → pg_graphql → toggle OFF
+```
+
+Or via SQL:
+```sql
+DROP EXTENSION IF EXISTS pg_graphql;
+```
+
+---
+
+## Custom Schema API Access — Fixing PGRST106
+
+When you add a custom schema to "Exposed schemas" in Dashboard but still get PGRST106:
+
+```sql
+-- The Dashboard setting alone is sometimes not enough.
+-- Also run this to ensure PostgREST picks up the schema change:
+ALTER ROLE authenticator SET pgrst.db_schemas TO 'public,myschema';
+NOTIFY pgrst, 'reload config';
+
+-- Verify current setting:
+SELECT rolconfig FROM pg_roles WHERE rolname = 'authenticator';
+```
+
+### Query a specific schema per-request
+```typescript
+// Switch schema for a single query (supabase-js built-in)
+const { data } = await supabase
+  .schema('myschema')
+  .from('internal_table')
+  .select('*')
+
+// Or in server-side code:
+const { data } = await adminSupabase
+  .schema('private')
+  .from('sensitive_table')
+  .select('*')
+```
+
+---
+
+## GraphQL API — Disabled by Default on New Projects (2025)
+
+```
+Projects created after 2025: pg_graphql is DISABLED by default.
+If your Rocket project uses a GraphQL client and hits 404 → enable it:
+
+Dashboard → Database → Extensions → pg_graphql → toggle ON
+
+Security: if you are NOT using GraphQL, leave it OFF (already the default).
+```
+
+```typescript
+// GraphQL endpoint (when enabled):
+// POST https://[PROJECT_REF].supabase.co/graphql/v1
+// Headers:
+//   apikey: [your publishable key]           -- always required
+//   Authorization: Bearer [user JWT]         -- for authenticated requests
+//   Content-Type: application/json
+
+// Basic query:
+const response = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/graphql/v1`, {
+  method: 'POST',
+  headers: {
+    'apikey': process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+              ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    'Authorization': `Bearer ${session.access_token}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    query: `{ ordersCollection(first: 10) { edges { node { id status amountCents } } } }`,
+  }),
+})
+// RLS applies automatically — user only sees their own orders
+```
+
+---
+
+## New Security Advisor Categories (2025)
+
+Security Advisor now checks these additional categories:
+
+```
+1. SECURITY DEFINER functions without SET search_path
+   Risk: search_path injection allows privilege escalation
+   Fix: always add SET search_path = public to SECURITY DEFINER functions
+
+2. Weak password policy
+   Check: Dashboard → Auth → Settings → Password → Minimum length ≥ 8
+   Check: Leaked password detection enabled (Pro plan)
+
+3. Extensions with excessive privileges
+   Flagged: extensions installed in public schema instead of extensions schema
+   Fix: reinstall in extensions schema
+
+4. Leaked API keys
+   Supabase scans GitHub for leaked project keys automatically
+   You receive an email if a key is found — rotate immediately
+```
+
+---
+
+## Security Checklist (run before every deploy)
+
+```sql
+-- Quick health check — tables without RLS
+SELECT tablename
+FROM pg_tables t
+WHERE schemaname = 'public'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_class c
+    WHERE c.relname = t.tablename
+      AND c.relrowsecurity = true
+      AND c.relnamespace = 'public'::regnamespace
+  );
+-- Should return 0 rows. If any rows: fix immediately.
+
+-- Tables with RLS enabled but NO policies (locked out — nobody can access)
+SELECT c.relname AS table_name
+FROM pg_class c
+WHERE c.relrowsecurity = true
+  AND c.relnamespace = 'public'::regnamespace
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_policies p WHERE p.tablename = c.relname AND p.schemaname = 'public'
+  );
+-- These tables have RLS but no policies = returns empty for everyone = intentional?
+```

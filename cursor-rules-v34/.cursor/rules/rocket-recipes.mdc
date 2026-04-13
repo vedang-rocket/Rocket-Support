@@ -1,0 +1,263 @@
+---
+description: >
+  how to build a SaaS app from scratch, e-commerce store with Stripe and Supabase,
+  AI chat app with OpenAI, blog with headless CMS, booking and scheduling app with Calendly,
+  lead generation landing page with email capture, full stack SaaS phases prompts,
+  Stripe go-live checklist, welcome email on signup, Netlify deploy after build,
+  which integrations for SaaS what stack to use, recommended stack by app type,
+  build order what to build first authentication or payments, subscription billing full recipe
+alwaysApply: false
+---
+
+# Rocket.new — Official Recipes & Build Guides
+
+> These are Rocket's own documented step-by-step recipes from docs.rocket.new/learn/recipes
+> Use these when users ask "how do I build X" — give them the exact stack and prompt sequence.
+
+---
+
+## 📋 Recipe 1: SaaS App
+**Stack**: Next.js + TypeScript → Supabase → Stripe → Resend → Netlify
+**Time**: 30–45 minutes
+
+### Phase 1 — Foundation
+```
+Build a SaaS called "[Name]" using Next.js and TypeScript.
+Pages: landing page with hero and feature sections, pricing page with Free
+and Pro tiers, /login, /signup, /dashboard with sidebar, /settings.
+Clean modern design with [color] primary. Responsive navbar with logo,
+nav links, and login/signup buttons.
+```
+
+### Phase 2 — Database
+```
+Connect Supabase. Create these tables:
+1. profiles — id (uuid, references auth.users), display_name (text),
+   avatar_url (text), created_at (timestamp)
+2. [your main data table] — id, user_id (references profiles),
+   [fields], created_at, updated_at
+Add RLS: users can only access their own rows where user_id = auth.uid().
+Create a trigger that auto-inserts a profiles row when a new user signs up.
+```
+
+### Phase 3 — Auth
+```
+Implement Supabase Auth:
+- email/password signup + login
+- forgot password flow
+- protect /dashboard and /settings — redirect unauthenticated to /login
+- user menu in top-right with avatar, name, and sign-out
+```
+
+### Phase 4 — Stripe
+```
+Connect Stripe test keys. Create a $[price]/month "[Plan Name]" subscription.
+Webhook handler at /api/webhooks/stripe for:
+checkout.session.completed, customer.subscription.updated,
+customer.subscription.deleted.
+On checkout complete → update user plan in Supabase 'subscriptions' table.
+Store Stripe customer ID and subscription ID.
+Add a billing page in settings showing current plan and "Manage Subscription"
+button linking to Stripe Customer Portal.
+```
+
+### Phase 5 — Email
+```
+Connect Resend. Send:
+- Welcome email on signup: greeting with user name + dashboard link
+- Receipt email after Stripe checkout: plan name, amount, billing date
+```
+
+### Phase 6 — Deploy
+```
+Deploy to Netlify. After deploying, add these redirect URLs to
+Supabase Auth → URL Configuration:
+https://[your-app].netlify.app
+https://[your-custom-domain.com]
+```
+
+### ⚠️ Go-Live Checklist
+- [ ] Recreate Stripe products/prices in LIVE mode (test mode items don't transfer)
+- [ ] Switch from Stripe test keys to live keys in env vars
+- [ ] Update Stripe webhook endpoint URL to production URL
+- [ ] Update Stripe webhook secret in Netlify env vars (live secret differs from test)
+- [ ] Add production URL to Supabase redirect URLs
+- [ ] Enable Supabase email confirmations to prevent spam signups
+
+---
+
+## 📋 Recipe 2: E-Commerce Store
+**Stack**: Next.js + TypeScript → Supabase → Stripe → SendGrid → Google Analytics → Netlify
+
+### Build Sequence
+```
+Phase 1:
+Create an online store with Next.js. Pages: /products (grid),
+/products/[slug] (detail), /cart, /checkout, /order-confirmation.
+Responsive design with a clean, minimal aesthetic.
+
+Phase 2:
+Connect Supabase. Create tables:
+- products: id, name (text), description (text), price (decimal),
+  image_url (text), inventory (integer), category (text), slug (text unique)
+- orders: id, user_id, status (text), total (decimal), created_at
+- order_items: id, order_id, product_id, quantity, price_at_purchase
+Add RLS: users can read all products, read/create only their own orders.
+
+Phase 3:
+Connect Stripe. Add checkout with:
+- line items from the cart
+- success_url: /order-confirmation?session_id={CHECKOUT_SESSION_ID}
+- cancel_url: /cart
+Webhook: on checkout.session.completed → create order + order_items in Supabase,
+update inventory.
+
+Phase 4:
+Connect SendGrid. Send order confirmation email on checkout.session.completed.
+Include: order ID, list of items, total, estimated delivery.
+```
+
+---
+
+## 📋 Recipe 3: AI-Powered App
+**Stack**: Next.js → Supabase → OpenAI or Anthropic → Stripe → Netlify
+
+### Build Sequence
+```
+Phase 1:
+Build an AI [type] app with Next.js. Pages: /chat (main interface),
+/history (saved conversations), /settings, /pricing.
+Clean chat UI with message bubbles, input field, and send button.
+
+Phase 2:
+Connect Supabase. Tables:
+- conversations: id, user_id, title (text), created_at
+- messages: id, conversation_id, role (text: 'user' | 'assistant'),
+  content (text), created_at
+RLS: users access only their own conversations and messages.
+
+Phase 3:
+Connect [OpenAI/Anthropic]. Add streaming chat responses.
+System prompt: "You are a [role]. [Constraints and purpose]."
+On each user message: save to messages table, call AI API,
+stream response to UI, save assistant response to messages table.
+
+Phase 4:
+Add rate limiting: free users get [X] messages/day, pro users unlimited.
+Track usage in Supabase. Show usage meter in the UI.
+Connect Stripe to gate pro features.
+```
+
+---
+
+## 📋 Recipe 4: Content Site / Blog
+**Stack**: Next.js → Strapi or Directus → Netlify → Google Analytics
+
+### Build Sequence
+```
+Phase 1:
+Build a blog with Next.js. Pages: / (home with latest posts),
+/blog (all posts with categories), /blog/[slug] (post detail),
+/about, /contact.
+Clean reading-focused design with good typography.
+
+Phase 2:
+Connect [Strapi/Directus] as headless CMS.
+Content types: articles (title, slug, body, excerpt, cover_image,
+author, category, published_at), categories (name, slug).
+Fetch articles via the CMS REST API on page load.
+
+Phase 3:
+Add SEO: dynamic meta tags and Open Graph tags on each article page
+using the article title, excerpt, and cover image.
+Add an RSS feed at /rss.xml.
+```
+
+---
+
+## 📋 Recipe 5: Booking / Scheduling App
+**Stack**: Next.js → Supabase → Calendly or Cal.com → Twilio or Resend → Netlify
+
+### Build Sequence
+```
+Phase 1:
+Build a consulting booking app with Next.js. Pages: / (landing),
+/book (scheduling), /dashboard (user's bookings), /profile.
+
+Phase 2:
+Embed [Calendly/Cal.com] on the /book page for scheduling.
+On booking confirmed → save booking to Supabase 'bookings' table:
+user_id, service, datetime, status.
+
+Phase 3:
+Send confirmation via [Twilio SMS / Resend email] when booking is confirmed.
+Include: service name, date, time, a "reschedule" link.
+Send a 24-hour reminder before the appointment.
+```
+
+---
+
+## 📋 Recipe 6: Lead Generation Site
+**Stack**: Next.js → Typeform or Tally → Mailchimp or Brevo → Airtable → Google Analytics → Netlify
+
+### Build Sequence
+```
+Phase 1:
+Build a lead generation landing page with Next.js.
+Sections: hero with headline + CTA, features (3 cards), testimonials (3),
+lead capture form (name, email, company), footer.
+
+Phase 2:
+Embed [Typeform/Tally] form for lead capture.
+On submit → add lead to Airtable 'leads' table (name, email, company, source, date).
+
+Phase 3:
+Connect [Mailchimp/Brevo].
+On form submit → add contact to email list and trigger welcome sequence.
+First email: delivered immediately with [lead magnet/resource].
+Second email: 2 days later with a case study.
+
+Phase 4:
+Connect Google Analytics (GA4).
+Track: page_view, form_started, form_submitted, cta_clicked.
+Set up a conversion goal for form_submitted.
+```
+
+---
+
+## When to Use Which Recipe
+
+| User wants to build | Send them |
+|---|---|
+| Subscription product with users | Recipe 1: SaaS |
+| Online store selling products | Recipe 2: E-Commerce |
+| App using AI/ChatGPT | Recipe 3: AI App |
+| Blog or content website | Recipe 4: Content Site |
+| Appointment or service booking | Recipe 5: Booking App |
+| Collect leads and email them | Recipe 6: Lead Gen |
+
+---
+
+## Recipes Troubleshooting
+
+### SaaS: Stripe subscription not reflected in app after payment
+- Webhook not reaching the app — add webhook endpoint to Stripe Dashboard
+- Raw body not parsed before signature verification
+- Fix: see rocket-troubleshooting.mdc → Stripe section
+
+### SaaS: New users see blank dashboard (no data)
+- Supabase profile trigger not created — run the trigger prompt from Phase 2
+- RLS too restrictive — check policies allow users to read their own rows
+
+### E-Commerce: Inventory not updating after purchase
+- Webhook handler not decrementing inventory
+- Fix: add inventory decrement logic in the `checkout.session.completed` handler
+
+### AI App: Messages not persisting across sessions
+- Conversation ID not stored in localStorage or URL
+- Fix: save `conversation_id` to URL params or Supabase on first message
+
+### All Recipes: Production deploy issues
+- See the ⚠️ Go-Live Checklist in Recipe 1 — applies to all recipes
+- Most common: Stripe webhook secret mismatch and missing Supabase redirect URLs
+

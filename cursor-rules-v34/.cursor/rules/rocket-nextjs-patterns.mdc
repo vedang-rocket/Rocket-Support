@@ -1,0 +1,470 @@
+---
+description: >
+  nextjs server actions use server revalidatePath revalidateTag, next.js mutations server actions,
+  unstable_cache expensive database queries nextjs, nextjs cache invalidation strategy,
+  revalidatePath after insert update delete nextjs, server actions vs API routes when to use,
+  nextjs 15 server actions supabase client, useFormState useFormStatus server actions,
+  next.js cache tags supabase, optimistic updates nextjs server actions,
+  nextjs caching strategy performance, revalidateTag nextjs supabase pattern,
+  server action supabase auth protected, nextjs route handler vs server action,
+  nextjs 15.2 searchParams Promise async await, generateStaticParams supabase database paths,
+  dynamicIO dynamicParams nextjs advanced caching, middleware chaining multiple middlewares
+globs: ["**/*.ts", "**/*.tsx", "**/app/**"]
+alwaysApply: false
+---
+
+# Next.js Modern Patterns — Server Actions, Caching & 15.2 Edge Cases
+
+---
+
+## Server Actions vs API Routes — When to Use Which
+
+```
+Server Actions ('use server'):
+  ✅ Form submissions
+  ✅ Mutations (create, update, delete)
+  ✅ Actions triggered by user interaction
+  ✅ When you need revalidatePath/revalidateTag after mutation
+  ✅ Less boilerplate — no Request/Response wrapping
+
+API Routes (app/api/*/route.ts):
+  ✅ Webhook handlers (Stripe, GitHub) — need raw request body
+  ✅ Endpoints called by external services
+  ✅ File uploads
+  ✅ Streaming responses (SSE, WebSockets)
+  ✅ Third-party OAuth callbacks
+  ❌ Don't use for simple mutations — Server Actions are better
+```
+
+---
+
+## Server Actions — Complete Pattern
+
+```typescript
+// app/actions/orders.ts
+'use server'
+import { createClient } from '@/lib/supabase/server'
+import { revalidatePath, revalidateTag } from 'next/cache'
+import { redirect } from 'next/navigation'
+import { z } from 'zod'
+
+const CreateOrderSchema = z.object({
+  items: z.array(z.object({ productId: z.string(), quantity: z.number().min(1) })),
+})
+
+export async function createOrder(formData: FormData) {
+  // 1. Auth check (always first in Server Actions)
+  const supabase = await createClient()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  if (authError || !user) redirect('/login')
+
+  // 2. Validate input
+  const items = JSON.parse(formData.get('items') as string)
+  const parsed = CreateOrderSchema.safeParse({ items })
+  if (!parsed.success) {
+    return { error: parsed.error.flatten().fieldErrors }
+  }
+
+  // 3. Perform mutation
+  const { data: order, error } = await supabase
+    .from('orders')
+    .insert({ user_id: user.id, status: 'pending' })
+    .select()
+    .single()
+
+  if (error) return { error: { _form: [error.message] } }
+
+  // 4. Invalidate cache — pages that show orders will refetch
+  revalidatePath('/dashboard/orders')
+  revalidateTag(`orders-${user.id}`)     // tag-based invalidation
+
+  // 5. Redirect or return success
+  redirect(`/orders/${order.id}`)
+}
+
+// Action with return value (no redirect)
+export async function updateOrderStatus(orderId: string, status: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return { error: 'Unauthorized' }
+
+  const { error } = await supabase
+    .from('orders')
+    .update({ status })
+    .eq('id', orderId)
+    .eq('user_id', user.id)    // RLS + explicit check
+
+  if (error) return { error: error.message }
+
+  revalidatePath(`/orders/${orderId}`)
+  return { success: true }
+}
+```
+
+### Call from a Client Component
+```typescript
+// components/CreateOrderButton.tsx
+'use client'
+import { createOrder } from '@/app/actions/orders'
+import { useFormStatus, useActionState } from 'react'
+
+function SubmitButton() {
+  const { pending } = useFormStatus()
+  return <button disabled={pending}>{pending ? 'Creating...' : 'Create Order'}</button>
+}
+
+export function CreateOrderForm() {
+  const [state, action] = useActionState(createOrder, undefined)
+
+  return (
+    <form action={action}>
+      {state?.error?._form && (
+        <p style={{ color: 'red' }}>{state.error._form.join(', ')}</p>
+      )}
+      <input type="hidden" name="items" value={JSON.stringify(items)} />
+      <SubmitButton />
+    </form>
+  )
+}
+```
+
+### Call directly from a Server Component
+```typescript
+// No 'use client' needed
+import { updateOrderStatus } from '@/app/actions/orders'
+
+export default async function OrderPage({ params }) {
+  return (
+    <form action={updateOrderStatus.bind(null, params.id, 'cancelled')}>
+      <button type="submit">Cancel Order</button>
+    </form>
+  )
+}
+```
+
+---
+
+## Cache Strategy — unstable_cache for Expensive Queries
+
+```typescript
+// lib/cached-data.ts
+import { unstable_cache } from 'next/cache'
+import { createClient } from '@/lib/supabase/server'
+
+// Cache expensive queries — revalidate on tag
+export const getProductCatalog = unstable_cache(
+  async () => {
+    const supabase = await createClient()
+    const { data } = await supabase
+      .from('products')
+      .select('id, name, price, category')
+      .eq('active', true)
+      .order('name')
+    return data ?? []
+  },
+  ['product-catalog'],           // cache key
+  {
+    tags: ['products'],          // invalidation tag
+    revalidate: 3600,            // also revalidate after 1 hour regardless
+  }
+)
+
+// Usage in Server Component (fast — cached)
+export default async function CatalogPage() {
+  const products = await getProductCatalog()
+  return <ProductGrid products={products} />
+}
+
+// Invalidate when products change (in Server Action or API route)
+import { revalidateTag } from 'next/cache'
+revalidateTag('products')       // all getProductCatalog calls refetch
+```
+
+### What NEVER to cache (auth-dependent routes)
+```typescript
+// ❌ NEVER cache pages that read user-specific data
+export const revalidate = 60         // breaks with Supabase auth
+export const dynamic = 'force-static' // breaks with Supabase auth
+
+// ✅ Always force dynamic for authenticated routes
+export const dynamic = 'force-dynamic'
+```
+
+---
+
+## revalidatePath Patterns
+
+```typescript
+// Specific page
+revalidatePath('/dashboard/orders')
+
+// Dynamic route — all variants
+revalidatePath('/orders/[id]', 'page')
+
+// Entire layout (all pages under /dashboard)
+revalidatePath('/dashboard', 'layout')
+
+// When to call:
+// After INSERT → revalidate list page
+// After UPDATE → revalidate detail page + list page
+// After DELETE → revalidate list page + redirect away from deleted item
+```
+
+---
+
+## Supabase Client in Server Actions
+
+```typescript
+// IMPORTANT: createClient() in Server Actions uses cookies() — same as Server Components
+// You get the user's session automatically — no need to pass auth tokens
+
+'use server'
+import { createClient } from '@/lib/supabase/server'  // uses cookies() internally
+
+export async function myAction() {
+  const supabase = await createClient()
+  // This client is authenticated as the current user
+  // RLS applies automatically
+  const { data } = await supabase.from('orders').select()
+  // Returns only the current user's orders (if RLS is set up correctly)
+}
+
+// For admin actions that bypass RLS:
+import { createAdminClient } from '@/lib/supabase/admin'
+
+export async function adminAction() {
+  // First verify the user is an admin
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  const role = user?.app_metadata?.user_role
+  if (role !== 'admin') return { error: 'Forbidden' }
+
+  // Then use admin client
+  const adminSupabase = createAdminClient()
+  const { data } = await adminSupabase.from('all_orders').select()
+  return { data }
+}
+```
+
+---
+
+## Next.js 15.2 — searchParams and params Are Now Promises
+
+In Next.js 15.2 the `params` and `searchParams` props in page/layout components became
+asynchronous. Accessing them synchronously causes a warning in 15.1 and a hard error in 15.2+.
+
+```typescript
+// ❌ WRONG — synchronous access (15.1 warning, 15.2 runtime error)
+export default function SearchPage({
+  searchParams,
+}: { searchParams: { q: string; page: string } }) {
+  const query = searchParams.q          // TypeError in 15.2
+  const page  = Number(searchParams.page)
+}
+
+// ✅ CORRECT — await both params and searchParams
+export default async function SearchPage({
+  params,
+  searchParams,
+}: {
+  params:       Promise<{ category: string }>
+  searchParams: Promise<{ q?: string; page?: string; sort?: string }>
+}) {
+  const { category }    = await params
+  const { q = '', page = '1', sort = 'created_at' } = await searchParams
+
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from('products')
+    .select()
+    .eq('category', category)
+    .ilike('name', `%${q}%`)
+    .order(sort)
+    .range((Number(page) - 1) * 20, Number(page) * 20 - 1)
+
+  return <ProductList products={data ?? []} />
+}
+```
+
+```typescript
+// Client components: use the useSearchParams() hook (unchanged — still sync)
+'use client'
+import { useSearchParams, useParams } from 'next/navigation'
+
+export function SearchWidget() {
+  const searchParams = useSearchParams()   // still sync in client components
+  const params       = useParams()
+  const q = searchParams.get('q') ?? ''
+  return <input defaultValue={q} />
+}
+```
+
+---
+
+## generateStaticParams with Supabase
+
+Pre-render dynamic routes from database rows at build time (SSG + ISR).
+
+```typescript
+// app/products/[slug]/page.tsx
+import { createAdminClient } from '@/lib/supabase/admin'
+import { notFound }          from 'next/navigation'
+
+// Runs at BUILD time — tells Next.js which slugs to pre-render
+export async function generateStaticParams() {
+  // Must use admin/service-role client — no user session during build
+  const supabase = createAdminClient()
+  const { data } = await supabase
+    .from('products')
+    .select('slug')
+    .eq('active', true)
+    .order('created_at', { ascending: false })
+    .limit(1000)              // cap for very large catalogs
+
+  return (data ?? []).map(row => ({ slug: row.slug }))
+}
+
+// Controls what happens when a slug is NOT in generateStaticParams:
+export const dynamicParams = true   // ✅ generate on-demand (ISR) — default
+// export const dynamicParams = false // return 404 for unknown slugs
+
+export default async function ProductPage({
+  params,
+}: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params        // always await in 15.2+
+
+  const supabase = await createClient()
+  const { data: product } = await supabase
+    .from('products').select().eq('slug', slug).single()
+
+  if (!product) notFound()
+  return <ProductDetail product={product} />
+}
+
+// Revalidate the entire product section when products change:
+// In a Supabase Database Webhook → POST /api/revalidate:
+//   revalidateTag('products')         // clears cache for all product pages
+//   revalidatePath('/products', 'layout')
+```
+
+---
+
+## dynamicIO — Opt-In Async I/O (Next.js 15 Experimental)
+
+```typescript
+// next.config.ts
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  experimental: {
+    dynamicIO: true,   // uncached async calls make the route dynamic by default
+  },
+}
+export default nextConfig
+```
+
+```typescript
+// With dynamicIO enabled:
+// Any page that calls supabase.from() WITHOUT unstable_cache becomes dynamic
+// → good: no accidental caching of user-specific data
+// → requires explicit opt-in to caching via unstable_cache
+
+import { unstable_cache } from 'next/cache'
+import { createAdminClient } from '@/lib/supabase/admin'
+
+// Public catalog — EXPLICITLY cached
+export const getPublicCatalog = unstable_cache(
+  async () => {
+    const s = createAdminClient()
+    const { data } = await s.from('products').select().eq('active', true)
+    return data ?? []
+  },
+  ['public-catalog'],
+  { tags: ['products'], revalidate: 3600 }
+)
+
+// User dashboard — NOT wrapped → stays dynamic (correct behaviour)
+export default async function DashboardPage() {
+  const supabase = await createClient()            // user session
+  const { data } = await supabase.from('orders').select()
+  return <Orders data={data} />
+}
+```
+
+---
+
+## Middleware Chaining Pattern
+
+Handle auth + other concerns without nesting callbacks.
+
+```typescript
+// middleware.ts
+import { createServerClient }            from '@supabase/ssr'
+import { type NextRequest, NextResponse } from 'next/server'
+
+type MiddlewareFn = (req: NextRequest, res: NextResponse) =>
+  Promise<NextResponse | null>
+
+// Compose: first function returning non-null response wins; null = continue chain
+async function chain(
+  req: NextRequest,
+  handlers: MiddlewareFn[]
+): Promise<NextResponse> {
+  const base = NextResponse.next({ request: req })
+  for (const fn of handlers) {
+    const result = await fn(req, base)
+    if (result) return result
+  }
+  return base
+}
+
+// ── individual middlewares ─────────────────────────────────────────────────
+
+async function maintenanceMiddleware(req: NextRequest): Promise<NextResponse | null> {
+  if (process.env.MAINTENANCE_MODE === 'true'
+      && !req.nextUrl.pathname.startsWith('/maintenance')) {
+    return NextResponse.redirect(new URL('/maintenance', req.url))
+  }
+  return null
+}
+
+async function authMiddleware(req: NextRequest, res: NextResponse): Promise<NextResponse | null> {
+  // Refresh Supabase session on every request (required by @supabase/ssr)
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+      ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll: ()  => req.cookies.getAll(),
+        setAll: (c) => c.forEach(({ name, value, options }) =>
+                        res.cookies.set(name, value, options)),
+      },
+    }
+  )
+  await supabase.auth.getUser()   // refreshes token in cookies
+
+  const { data: { user } } = await supabase.auth.getUser()
+  const protectedPaths = ['/dashboard', '/settings', '/account']
+  const isProtected    = protectedPaths.some(p => req.nextUrl.pathname.startsWith(p))
+
+  if (isProtected && !user) {
+    const loginUrl = new URL('/login', req.url)
+    loginUrl.searchParams.set('next', req.nextUrl.pathname)
+    return NextResponse.redirect(loginUrl)
+  }
+  return null
+}
+
+// ── main export ────────────────────────────────────────────────────────────
+
+export async function middleware(req: NextRequest) {
+  return chain(req, [maintenanceMiddleware, authMiddleware])
+}
+
+export const config = {
+  matcher: [
+    '/((?!_next/static|_next/image|favicon\.ico|.*\.(?:svg|png|jpg|ico|css|js)$).*)',
+  ],
+}
+```

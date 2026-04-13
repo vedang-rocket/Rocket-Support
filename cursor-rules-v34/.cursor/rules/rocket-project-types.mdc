@@ -1,0 +1,193 @@
+---
+description: >
+  what type of project is this, identify project type, SaaS app subscription billing,
+  e-commerce store products orders, AI chat app OpenAI conversations messages,
+  booking scheduling app appointments, lead generation landing page, blog content site,
+  which recipe applies, what features should this project have, project pattern recognition,
+  subscription table present, products table present, conversations table present,
+  what integrations does this project use, project architecture type
+globs: []
+alwaysApply: false
+---
+
+# Rocket.new — Project Type Recognition
+
+> Identify the project type FIRST. Different project types have different failure modes,
+> different required tables, and different "this is definitely missing" patterns.
+> Run this recognition automatically when opening any new project.
+
+---
+
+## HOW TO IDENTIFY THE PROJECT TYPE
+
+Check these signals in order:
+
+### Signal 1 — Database tables (most reliable via Supabase MCP)
+```sql
+SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;
+```
+
+### Signal 2 — Package.json dependencies
+```bash
+cat package.json | grep -E '"stripe|openai|anthropic|resend|twilio|calendly'
+```
+
+### Signal 3 — API routes present
+```bash
+find ./app/api -name "route.ts" | sort
+```
+
+---
+
+## PROJECT TYPE LOOKUP TABLE
+
+### TYPE A — SaaS App (Subscription Billing)
+**Signals**: `subscriptions` table + `stripe` in package.json + `/api/webhooks/stripe/`
+**Typical tables**: `profiles`, `subscriptions`, `[core feature table]`
+
+**Most common failure modes**:
+1. Stripe webhook using `request.json()` → signature fails silently
+2. `subscriptions` table has no RLS → all users see all subscription data
+3. Checkout session missing `metadata: { user_id }` → webhook can't find the user
+4. Test mode Stripe keys in production → payments appear to work, no real money
+5. No customer portal route → users can't cancel/upgrade
+
+**What's almost certainly missing**:
+- Rate limiting on AI/heavy endpoints
+- Customer portal (`/api/stripe/portal/route.ts`)
+- Subscription status check before showing premium features
+
+**Commands to run first**: `/audit-codebase` → `/fix-stripe` if webhook issues → `/security-audit`
+
+---
+
+### TYPE B — E-Commerce Store
+**Signals**: `products` table + `orders` table + `order_items` table
+**Typical tables**: `profiles`, `products`, `orders`, `order_items`, `categories`
+
+**Most common failure modes**:
+1. No inventory decrement on successful checkout
+2. `products` table readable by anyone but writable by anyone too (RLS gap)
+3. Order total calculated client-side (can be manipulated)
+4. No `ON DELETE CASCADE` on `order_items` → orphaned rows when orders deleted
+5. Missing product image domain in `next.config.ts`
+
+**What's almost certainly missing**:
+- Admin-only INSERT/UPDATE/DELETE policy on `products`
+- Server-side price calculation (never trust client-side total)
+- Order confirmation email via Resend
+
+**Commands to run first**: `/audit-codebase` → `/security-audit` → `/fix-performance` (products queries)
+
+---
+
+### TYPE C — AI Chat App
+**Signals**: `conversations` table + `messages` table + `openai` or `anthropic` in package.json
+**Typical tables**: `profiles`, `conversations`, `messages`, `[usage_tracking]`
+
+**Most common failure modes**:
+1. No rate limiting on `/api/chat` → anyone can burn your OpenAI credits
+2. All messages stored without RLS → users can see each other's conversations
+3. No `max_tokens` limit → runaway costs on long conversations
+4. Streaming not implemented → responses feel slow
+5. No usage tracking → can't enforce per-user limits
+
+**What's almost certainly missing**:
+- `ai_usage` table to track requests per user per day
+- Rate limit check before every AI API call
+- System prompt that constrains the AI to the app's purpose
+
+**Commands to run first**: `/audit-codebase` → `/security-audit` (exposed API routes) → `/fix-performance`
+
+---
+
+### TYPE D — Booking / Scheduling App
+**Signals**: `bookings` or `appointments` table + Calendly/Cal.com integration
+**Typical tables**: `profiles`, `bookings`, `services`, `availability`
+
+**Most common failure modes**:
+1. Double-booking (no unique constraint on time slots)
+2. Booking confirmation email not sending in production (env var missing)
+3. Timezone handling broken (storing local time instead of UTC)
+4. No cancellation logic → cancelled bookings still show as active
+
+**What's almost certainly missing**:
+- Unique constraint preventing double-bookings
+- `TIMESTAMPTZ` (not `TIMESTAMP`) for all booking times
+- Reminder email 24h before appointment
+
+**Commands to run first**: `/audit-codebase` → `/fix-deployment` (email likely broken in prod)
+
+---
+
+### TYPE E — Landing Page / Lead Gen
+**Signals**: `leads` or `contacts` table + Typeform/Tally + email integration
+**Typical tables**: `profiles` (minimal), `leads`, `email_subscriptions`
+
+**Most common failure modes**:
+1. Form submissions not saving to database (RLS blocking INSERT)
+2. Email confirmation going to spam (domain not verified)
+3. No duplicate lead prevention (same email submits twice)
+4. GDPR consent not stored (legal risk in EU)
+
+**What's almost certainly missing**:
+- Unique constraint on email in leads table
+- Unsubscribe mechanism
+- `consent_given` column with timestamp
+
+**Commands to run first**: `/audit-codebase` → `/fix-database` (leads INSERT RLS)
+
+---
+
+### TYPE F — Content Site / Blog
+**Signals**: `articles` or `posts` table + headless CMS integration OR `content` in markdown files
+**Typical tables**: `profiles`, `posts`, `categories`, `tags`
+
+**Most common failure modes**:
+1. No canonical URL → duplicate content SEO penalty
+2. Missing `sitemap.ts` → pages not indexed
+3. Images not optimized (using `<img>` not `<Image>`)
+4. No OG meta tags → poor social share preview
+
+**What's almost certainly missing**:
+- `app/sitemap.ts`
+- `app/robots.ts`
+- OG image generation
+- RSS feed
+
+**Commands to run first**: `/audit-codebase` → `/fix-performance` (image optimization)
+
+---
+
+### TYPE G — Unknown / Custom
+**Signals**: None of the above match clearly
+
+**Approach**:
+```bash
+# Read the landing page to understand what it does
+cat app/page.tsx | head -50
+
+# Read the README if it exists
+cat README.md 2>/dev/null | head -30
+```
+
+Ask the developer: "What does this app do?" before proceeding.
+
+---
+
+## AFTER IDENTIFICATION
+
+Once type is identified, state it clearly:
+
+```
+Project type identified: [TYPE A — SaaS App]
+
+Expected tables: profiles ✅ | subscriptions ✅ | [core table] ❓
+Expected integrations: Stripe ✅ | Resend ❓
+Known failure modes for this type: [list top 3]
+Almost certainly missing: [list]
+
+Recommended first command: /audit-codebase
+```
+
+Then proceed with the audit knowing what to look for.

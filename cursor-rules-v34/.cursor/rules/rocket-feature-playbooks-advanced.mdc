@@ -1,0 +1,248 @@
+---
+description: >
+  file upload Supabase storage, real-time data subscriptions useEffect channel, public API endpoint
+  rate limiting, Google OAuth integration social login, OpenAI streaming chat response ReadableStream,
+  add file upload feature, real-time updates live data, rate limit API route, connect Google login,
+  OpenAI stream chat, add AI chat feature, storage bucket upload, supabase realtime channel,
+  useChannel subscription, how to implement file uploads, how to add real-time features
+globs: []
+alwaysApply: false
+---
+
+## Playbook 6: File Upload to Supabase Storage
+
+```typescript
+// Client component — 'use client'
+'use client'
+import { createClient } from '@/lib/supabase/client'
+import { useState } from 'react'
+
+export function FileUpload({ userId }: { userId: string }) {
+  const [uploading, setUploading] = useState(false)
+  const supabase = createClient()
+
+  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setUploading(true)
+    const fileName = `${userId}/${Date.now()}-${file.name}`
+
+    const { data, error } = await supabase.storage
+      .from('uploads')          // bucket name
+      .upload(fileName, file, { upsert: true })
+
+    if (error) {
+      console.error('Upload failed:', error.message)
+    } else {
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('uploads')
+        .getPublicUrl(data.path)
+      console.log('Uploaded:', publicUrl)
+    }
+    setUploading(false)
+  }
+
+  return <input type="file" onChange={handleUpload} disabled={uploading} />
+}
+```
+
+**SQL for storage RLS** (run in Supabase SQL Editor):
+```sql
+-- Users can upload files to their own folder
+CREATE POLICY "upload_own" ON storage.objects FOR INSERT
+  WITH CHECK (bucket_id = 'uploads' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+-- Users can read their own files
+CREATE POLICY "read_own" ON storage.objects FOR SELECT
+  USING (bucket_id = 'uploads' AND auth.uid()::text = (storage.foldername(name))[1]);
+```
+
+**Common mistakes**: No storage RLS policies. Using public bucket for private files. Not adding Supabase storage domain to `next.config.ts` `images.remotePatterns`.
+
+---
+
+## Playbook 7: Real-Time Data with Supabase Subscriptions
+
+```typescript
+// 'use client' component
+'use client'
+import { createClient } from '@/lib/supabase/client'
+import { useEffect, useState } from 'react'
+import type { Message } from '@/lib/types'
+
+export function LiveMessages({ roomId, initialMessages }: {
+  roomId: string
+  initialMessages: Message[]
+}) {
+  const [messages, setMessages] = useState(initialMessages)
+  const supabase = createClient()
+
+  useEffect(() => {
+    const channel = supabase
+      .channel(`room-${roomId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `room_id=eq.${roomId}`,
+      }, (payload) => {
+        setMessages(prev => [...prev, payload.new as Message])
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [roomId])
+
+  return <div>{messages.map(m => <div key={m.id}>{m.content}</div>)}</div>
+}
+```
+
+**SQL** — enable real-time on the table (Supabase Dashboard → Database → Replication, or SQL):
+```sql
+ALTER TABLE messages REPLICA IDENTITY FULL;
+```
+
+---
+
+## Playbook 8: Public API Endpoint with Rate Limiting
+
+```typescript
+// app/api/public/data/route.ts
+import { NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+
+const RATE_LIMIT = 100 // requests per hour
+const rateLimitMap = new Map<string, { count: number; reset: number }>()
+
+export async function GET(request: Request) {
+  // Rate limit by IP
+  const ip = request.headers.get('x-forwarded-for') ?? 'unknown'
+  const now = Date.now()
+  const hourMs = 60 * 60 * 1000
+
+  const rateData = rateLimitMap.get(ip) ?? { count: 0, reset: now + hourMs }
+  if (now > rateData.reset) { rateData.count = 0; rateData.reset = now + hourMs }
+  rateData.count++
+  rateLimitMap.set(ip, rateData)
+
+  if (rateData.count > RATE_LIMIT) {
+    return NextResponse.json({ error: 'Rate limit exceeded' }, {
+      status: 429,
+      headers: { 'Retry-After': String(Math.ceil((rateData.reset - now) / 1000)) }
+    })
+  }
+
+  // Validate API key (optional)
+  const apiKey = request.headers.get('x-api-key')
+  if (!apiKey) return NextResponse.json({ error: 'API key required' }, { status: 401 })
+
+  const supabase = await createClient()
+  const { data: keyRecord } = await supabase
+    .from('api_keys')
+    .select('user_id')
+    .eq('key', apiKey)
+    .single()
+
+  if (!keyRecord) return NextResponse.json({ error: 'Invalid API key' }, { status: 401 })
+
+  const { data } = await supabase.from('public_data').select('*').limit(100)
+  return NextResponse.json(data)
+}
+```
+
+---
+
+## Playbook 9: Google OAuth Integration
+
+**Prerequisites**: Social auth ONLY works on live preview URL or custom domain. NOT on localhost.
+
+**Step 1 — Google Cloud Console**
+1. console.cloud.google.com → APIs & Services → Credentials
+2. Create OAuth 2.0 Client ID (Web application)
+3. Authorized redirect URIs: `https://[supabase-project-id].supabase.co/auth/v1/callback`
+4. Authorized JavaScript origins: `https://[your-app].netlify.app`
+
+**Step 2 — Supabase Dashboard**
+Auth → Sign In / Providers → Google → paste Client ID + Secret → Enable → Save
+
+**Step 3 — UI Button**
+```typescript
+// components/auth/google-button.tsx
+'use client'
+import { createClient } from '@/lib/supabase/client'
+
+export function GoogleSignInButton() {
+  const supabase = createClient()
+
+  async function signInWithGoogle() {
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    })
+  }
+
+  return <button onClick={signInWithGoogle}>Sign in with Google</button>
+}
+```
+
+**Step 4 — Ensure `app/auth/callback/route.ts` exists** (see Architecture playbook — file #2)
+
+**Common mistakes**: Testing on localhost (won't work — use deployed URL). Wrong callback URL format in Google Console.
+
+---
+
+## Playbook 10: OpenAI Streaming Chat Response
+
+```typescript
+// app/api/chat/route.ts
+import OpenAI from 'openai'
+import { createClient } from '@/lib/supabase/server'
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return new Response('Unauthorized', { status: 401 })
+
+  const { messages } = await request.json()
+
+  const stream = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',  // use mini for real-time chat — gpt-4o is too slow
+    messages: [
+      { role: 'system', content: 'You are a helpful assistant.' },
+      ...messages,
+    ],
+    stream: true,
+    max_tokens: 1000,
+  })
+
+  // Return a streaming response
+  const encoder = new TextEncoder()
+  const readable = new ReadableStream({
+    async start(controller) {
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content ?? ''
+        if (text) controller.enqueue(encoder.encode(text))
+      }
+      controller.close()
+    },
+  })
+
+  return new Response(readable, {
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  })
+}
+
+// Client-side usage:
+// const response = await fetch('/api/chat', { method: 'POST', body: JSON.stringify({ messages }) })
+// const reader = response.body!.getReader()
+// while streaming: const { done, value } = await reader.read()
+```
+
+**Common mistakes**: Using `gpt-4o` (too slow for streaming UX — use `gpt-4o-mini`). Not implementing rate limiting on the AI endpoint (add usage tracking from Playbook 8).
+

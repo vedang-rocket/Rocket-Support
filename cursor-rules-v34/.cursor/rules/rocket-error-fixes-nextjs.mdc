@@ -1,0 +1,463 @@
+---
+description: >
+  error message exact fix, TypeError cannot read, useSearchParams suspense boundary,
+  hydration failed server client mismatch, cookies should be awaited Next.js 15,
+  params should be awaited route param async, module not found cannot resolve,
+  AuthApiError invalid credentials, AuthSessionMissingError, JWT expired invalid,
+  new row violates row-level security, PGRST116 JSON object requested multiple rows,
+  ForeignKeyViolationError profiles foreign key, supabaseUrl is required client not initialized,
+  relation does not exist table missing, postgres error code, supabase query returns empty,
+  auth session missing error, unauthorized 401, RLS blocking insert update delete
+globs: ["**/*.ts", "**/*.tsx", "**/*.js"]
+alwaysApply: false
+---
+
+---
+
+# Rocket.new — Error Message → Exact Fix Reference
+
+> Paste the exact error here, find the root cause, apply the exact fix.
+> All fixes are for Next.js (TypeScript) + Supabase + Stripe stack.
+
+> **MCP-First**: For database-related errors, use Supabase MCP `execute_sql` to run
+> diagnostic queries directly instead of copying SQL to Supabase SQL Editor.
+> All SQL in this file can be run via MCP tool calls.
+
+---
+
+## ⚡ NEXT.JS ERRORS
+
+
+### `Error: Route param 'id' should be awaited before using its properties`
+**Cause**: Next.js 15 made dynamic route params async
+```typescript
+// ❌ BROKEN (Next.js 14 syntax)
+export default function Page({ params }: { params: { id: string } }) {
+  const id = params.id
+}
+
+// ✅ FIX (Next.js 15)
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+}
+```
+
+---
+
+### `Error: useSearchParams() should be wrapped in a suspense boundary`
+**File**: Any page using `useSearchParams()`
+**Cause**: Next.js 14+ requires `useSearchParams` inside `<Suspense>`
+```typescript
+// ❌ BROKEN
+'use client'
+import { useSearchParams } from 'next/navigation'
+export default function Page() {
+  const params = useSearchParams() // crashes
+}
+
+// ✅ FIX — wrap in Suspense
+import { Suspense } from 'react'
+function SearchComponent() {
+  const params = useSearchParams()
+  return <div>{params.get('q')}</div>
+}
+export default function Page() {
+  return <Suspense fallback={<div>Loading...</div>}><SearchComponent /></Suspense>
+}
+```
+
+---
+
+### `Error: Hydration failed because the initial UI does not match what was rendered on the server`
+**Cause**: Browser-only APIs (`window`, `localStorage`, `Date`, random values) used at render time
+```typescript
+// ❌ BROKEN — window is undefined on server
+export default function Component() {
+  const width = window.innerWidth  // crashes during SSR
+}
+
+// ✅ FIX — use useEffect for browser-only code
+'use client'
+import { useState, useEffect } from 'react'
+export default function Component() {
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    setWidth(window.innerWidth)
+  }, [])
+  return <div>{width}px</div>
+}
+```
+
+---
+
+### `Error: Route "/path" used \`cookies()\`/\`headers()\` without \`await\``
+**Cause**: Next.js 15 made `cookies()` and `headers()` async
+```typescript
+// ❌ BROKEN (Next.js 14 syntax, breaks in 15)
+const cookieStore = cookies()
+
+// ✅ FIX
+const cookieStore = await cookies()
+const headersList = await headers()
+```
+
+---
+
+### `TypeError: Cannot read properties of undefined (reading 'user')`
+**Cause**: Accessing auth user before session loads, or in a Server Component without awaiting
+```typescript
+// ❌ BROKEN
+const { data } = supabase.auth.getUser()  // missing await
+
+// ✅ FIX
+const { data: { user }, error } = await supabase.auth.getUser()
+if (error || !user) redirect('/login')
+```
+
+---
+
+### `Error: Dynamic server usage: Page couldn't be rendered statically because it used \`cookies\``
+**Cause**: Using cookies/auth in a page that Next.js tries to statically render
+```typescript
+// ✅ FIX — force dynamic rendering
+export const dynamic = 'force-dynamic'
+
+// Add this at the top of the page file
+export default async function Page() { ... }
+```
+
+---
+
+### `Module not found: Can't resolve '@/lib/supabase/client'`
+**Cause**: Import alias `@` not configured or wrong file path
+```typescript
+// Check next.config.ts has:
+/** @type {import('next').NextConfig} */
+const nextConfig = {}
+export default nextConfig
+
+// Check tsconfig.json has:
+{
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}
+
+// If file is in /src, use:
+"@/*": ["./src/*"]
+```
+
+---
+
+### Build error: `Type error: Property 'X' does not exist on type 'Y'`
+**Cause**: TypeScript type mismatch — common in Rocket-generated Supabase query results
+```typescript
+// ✅ FIX — type the Supabase response
+type Profile = {
+  id: string
+  display_name: string | null
+  avatar_url: string | null
+  created_at: string
+}
+
+const { data: profile, error } = await supabase
+  .from('profiles')
+  .select('*')
+  .eq('id', user.id)
+  .single<Profile>()  // add generic type
+```
+
+---
+
+### `ENOENT: no such file or directory` during `npm run build`
+**Cause**: Missing file that's imported somewhere, or wrong path
+```bash
+# Find what's importing the missing file
+grep -r "missing-file-name" ./app ./components ./lib
+# Fix the import path or create the missing file
+```
+
+---
+
+## ⚡ SUPABASE AUTH ERRORS
+
+### `AuthApiError: Invalid login credentials`
+**Cause**: Wrong email/password, OR email not confirmed yet
+```typescript
+// ✅ FIX — better error handling
+const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+
+if (error) {
+  if (error.message.includes('Email not confirmed')) {
+    // Resend confirmation email
+    await supabase.auth.resend({ type: 'signup', email })
+    return { error: 'Please check your email and confirm your account first' }
+  }
+  return { error: 'Invalid email or password' }
+}
+```
+
+---
+
+### `AuthApiError: Email link is invalid or has expired`
+**Cause**: Confirmation/reset link is more than 24 hours old, or already used
+```typescript
+// ✅ FIX — show resend option in UI
+const handleExpiredLink = async () => {
+  await supabase.auth.resend({
+    type: 'signup',    // or 'email_change' or 'sms'
+    email: userEmail,
+  })
+}
+```
+
+---
+
+### `AuthSessionMissingError: Auth session missing!`
+**Cause**: Trying to use server Supabase client without a valid session cookie
+```typescript
+// ✅ FIX — always check before using session
+const { data: { user }, error } = await supabase.auth.getUser()
+if (error || !user) {
+  // Handle gracefully — don't crash
+  redirect('/login')
+}
+```
+
+---
+
+### `JWT expired` / `invalid JWT` / `no API key found in request`
+**Cause**: Supabase client not initialized with env vars, or session expired without refresh
+```typescript
+// ✅ FIX — check env vars are set
+console.log(process.env.NEXT_PUBLIC_SUPABASE_URL)  // should not be undefined
+
+// ✅ FIX — ensure middleware.ts exists and calls updateSession
+// middleware.ts MUST be at the project root (not inside /app or /src/app)
+// It refreshes the session on every request
+
+// ✅ FIX — add auto-refresh in client component
+useEffect(() => {
+  const { data: { subscription } } = supabase.auth.onAuthStateChange(
+    (event, session) => {
+      if (event === 'TOKEN_REFRESHED') {
+        // Session was refreshed automatically
+      }
+      if (event === 'SIGNED_OUT') {
+        router.push('/login')
+      }
+    }
+  )
+  return () => subscription.unsubscribe()
+}, [])
+```
+
+---
+
+### `new row violates row-level security policy` / RLS blocks all queries
+**Cause**: RLS enabled but no policies created, or wrong user_id field name
+```sql
+-- ✅ FIX — check what policies exist
+SELECT * FROM pg_policies WHERE tablename = 'your_table';
+
+-- ✅ FIX — create missing policies (run in Supabase SQL Editor)
+ALTER TABLE your_table ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "select_own" ON your_table FOR SELECT
+USING (auth.uid() = user_id);
+
+CREATE POLICY "insert_own" ON your_table FOR INSERT
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "update_own" ON your_table FOR UPDATE
+USING (auth.uid() = user_id);
+
+-- If the column is named differently (e.g., 'owner_id', 'created_by'):
+CREATE POLICY "select_own" ON your_table FOR SELECT
+USING (auth.uid() = owner_id);
+```
+
+---
+
+### `ForeignKeyViolationError: insert or update on table "profiles" violates foreign key constraint`
+**Cause**: Trying to insert a profile for a user_id that doesn't exist in auth.users
+```typescript
+// ✅ FIX — always use the actual auth user ID
+const { data: { user } } = await supabase.auth.getUser()
+// user.id is the UUID from auth.users — use this, not a custom ID
+await supabase.from('profiles').insert({ id: user!.id, ... })
+```
+
+---
+
+### OAuth redirect: `Redirect URL mismatch` / blank page after Google login
+**Cause**: Callback URL in provider console or Supabase doesn't match app URL
+```
+✅ FIX checklist:
+1. Supabase Dashboard → Auth → URL Configuration → add:
+   - http://localhost:3000/auth/callback
+   - https://your-app.netlify.app/auth/callback
+   - https://your-custom-domain.com/auth/callback
+
+2. Google Cloud Console → Authorized redirect URIs → add:
+   https://[project-id].supabase.co/auth/v1/callback
+
+3. Make sure app/auth/callback/route.ts exists and calls:
+   supabase.auth.exchangeCodeForSession(code)
+```
+
+---
+
+### Dashboard shows blank after signup (no user data)
+**Cause**: Profile trigger doesn't exist — `profiles` table is empty after signup
+```sql
+-- ✅ FIX — create the trigger (run in Supabase SQL Editor)
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, display_name, created_at)
+  VALUES (NEW.id, NEW.email, NOW())
+  ON CONFLICT (id) DO NOTHING;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+```
+
+---
+
+### `Supabase client not initialized` / `supabaseUrl is required`
+**Cause**: Environment variables not loaded — missing `.env.local` or wrong var names
+```bash
+# ✅ FIX — check .env.local exists at project root with:
+NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+
+# Variables MUST have NEXT_PUBLIC_ prefix to be available in browser
+# Restart dev server after changing .env.local
+npm run dev
+```
+
+---
+
+## ⚡ SUPABASE DATABASE ERRORS
+
+### `relation "table_name" does not exist`
+**Cause**: Migration scripts not pushed to Supabase — tables were generated but not applied
+```
+✅ FIX:
+In Rocket: Project → Integrations → Supabase → Migrations → Push all pending
+OR
+In Supabase SQL Editor: manually run the CREATE TABLE statements from the migration files
+```
+
+---
+
+### Query returns `[]` (empty array) when data exists
+**Cause #1**: RLS is blocking — user is not authenticated or policy is wrong
+**Cause #2**: Filtering on wrong column or wrong value
+```typescript
+// ✅ DEBUG — check what's happening
+const { data, error, count } = await supabase
+  .from('your_table')
+  .select('*', { count: 'exact' })
+
+console.log({ data, error, count })
+// If error mentions RLS → fix policies
+// If count is 0 → data really is empty or filter is wrong
+// If error is null but data is [] → RLS is silently filtering
+```
+
+---
+
+### `PGRST116: JSON object requested, multiple (or no) rows returned`
+**Cause**: Using `.single()` when query returns 0 or 2+ rows
+```typescript
+// ❌ BROKEN — crashes if no row found
+const { data } = await supabase.from('profiles').select('*').eq('id', id).single()
+
+// ✅ FIX — use maybeSingle() for optional results
+const { data } = await supabase.from('profiles').select('*').eq('id', id).maybeSingle()
+// data will be null if not found, instead of throwing
+```
+
+---
+
+## ⚡ STRIPE ERRORS
+
+### `StripeSignatureVerificationError: No signatures found matching the expected signature for payload`
+**Cause**: Request body parsed as JSON before signature verification (destroys raw body)
+```typescript
+// ❌ BROKEN — destroys raw body
+const body = await request.json()  // NEVER do this for webhooks
+
+// ✅ FIX — use raw text
+const body = await request.text()  // preserves raw bytes for signature check
+const sig = request.headers.get('stripe-signature')!
+const event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
+```
+
+---
+
+### `StripeInvalidRequestError: No such price: 'price_xxx'`
+**Cause**: Using test mode price ID in live mode (or vice versa)
+```
+✅ FIX:
+1. In Stripe Dashboard, switch to LIVE mode
+2. Create the product and price again in live mode
+3. Copy the new price_xxx ID from live mode
+4. Update STRIPE_PRICE_ID env var in Netlify to the live mode price ID
+5. Test mode and live mode price IDs are DIFFERENT — they don't transfer
+```
+
+---
+
+### `StripeInvalidRequestError: No such customer: 'cus_xxx'`
+**Cause**: Customer exists in test mode but you're using live keys (or vice versa)
+```
+✅ FIX:
+- Test customers (cus_test_...) only exist in test mode
+- Live customers only exist in live mode
+- Match your STRIPE_SECRET_KEY environment with the customer IDs
+- In development always use sk_test_ keys
+- In production always use sk_live_ keys
+```
+
+---
+
+### Stripe checkout succeeds but app doesn't update subscription status
+**Cause**: Webhook not registered, wrong endpoint URL, or wrong webhook secret
+```
+✅ FIX checklist:
+1. Stripe Dashboard → Developers → Webhooks → check endpoint exists
+2. Endpoint URL must be: https://your-production-url.com/api/webhooks/stripe
+   (NOT localhost — Stripe can't reach localhost)
+3. For local testing: stripe listen --forward-to localhost:3000/api/webhooks/stripe
+4. Webhook secret in env var must match the secret for THAT specific endpoint
+   (each endpoint has its own unique secret)
+5. Check webhook logs in Stripe Dashboard → Developers → Webhooks → [endpoint] → Recent deliveries
+```
+
+---
+
+### `Stripe payment form not loading` / blank iframe
+**Cause**: Stripe publishable key is wrong or missing
+```typescript
+// ✅ FIX — check key is correct prefix
+// Test: pk_test_...
+// Live: pk_live_...
+// In browser console, should NOT see: "Invalid Publishable Key"
+
+// Correct Stripe Elements setup
+import { loadStripe } from '@stripe/stripe-js'
+const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!)
+```
+
+---
+

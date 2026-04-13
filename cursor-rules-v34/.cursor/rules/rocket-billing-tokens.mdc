@@ -1,0 +1,139 @@
+---
+description: >
+  tokens running out, how many tokens does X cost, starter plan tokens gone, upgraded plan
+  but tokens did not increase, token rollover policy, refuel tokens, cancel subscription what
+  happens, annual plan token expiry, billing cycle reset date, how to get more tokens,
+  Personal vs Rocket vs Booster plan difference, 1 million tokens not enough, token burn rate,
+  subscription management, prorated charge after upgrade, tokens expired on cancellation
+alwaysApply: false
+---
+
+# Rocket.new — Billing & Tokens (Expert Reference)
+
+## Plans at a Glance
+| Plan | Price | Monthly Tokens | Figma Screens | Private? | Fix It Free? |
+|---|---|---|---|---|---|
+| **Starter** | Free | 1M ONE-TIME | 2 | ❌ Public | ❌ |
+| **Personal** | $25/mo | 5M | 6 | ✅ | ✅ |
+| **Rocket** | $50/mo | 10.5M (500K bonus) | 12 | ✅ | ✅ |
+| **Booster** | $100/mo | 22M (2M bonus) | 25 | ✅ | ✅ |
+| Annual billing | -20% | same | same | ✅ | ✅ |
+
+## Token Types
+| Type | Description | Expires? |
+|---|---|---|
+| **Subscription tokens** | Included in monthly plan | At cancellation |
+| **Bonus tokens** | Auto-granted with Rocket/Booster plans | At cancellation |
+| **Refuel tokens** | One-time purchase ($20 = 5M) | At cancellation |
+
+## Rollover Policy
+- **Monthly paid**: Unused tokens roll over indefinitely month-to-month ✅
+- **Annual plans**: Roll over within 12-month term only — at renewal, ALL remaining tokens expire, fresh balance starts
+- **Starter**: One-time 1M, never replenishes ❌
+- **Cancellation**: ALL token types expire at end of current billing cycle
+
+---
+
+## 🔴 The Starter Token Trap (Most Complained-About Issue)
+
+### What Users Expect vs Reality
+- **Expectation**: "I have 1M free tokens to build my app"
+- **Reality**: 1M tokens is one-time only. Runs out in 2–4 build sessions for anything beyond a basic landing page.
+
+### What 1M Tokens Covers (Roughly)
+| Task | Token Cost |
+|---|---|
+| Generate initial landing page | ~200K–300K |
+| Add 2 more pages | ~200K–300K |
+| Connect a contact form | ~100K |
+| One bug fix cycle | ~50K–150K |
+| **Total** | **~600K–850K → nearly gone** |
+
+**Conclusion**: 1M is a demo amount, not enough for a production app.
+
+**Reality**: 1M tokens is enough to demo the platform, not to build a production app. Users who hit zero on Starter need to upgrade to Personal ($25/mo) to get a monthly token refresh.
+
+---
+
+## 🔴 Upgrade Confusion: "I Didn't Get the Tokens I Expected"
+
+### The Upgrade Math (Surprises Many Users)
+**Scenario**: User on Starter (1M) upgrades to Personal (5M)
+- Starter tokens are **replaced**, NOT added
+- If they used 600K starter tokens, they get: 5M - 600K = **4.4M Personal tokens**
+- NOT 5M + remaining starter = 6M (this is the common wrong expectation)
+
+**Scenario**: User on Personal (5M) upgrades to Rocket (10.5M mid-cycle)
+- Prorated charge for remaining days
+- Gets full Rocket allocation minus already-used Personal tokens
+- Example: Used 3M of 5M Personal → gets **7.5M tokens instantly**
+
+### What to Tell Users
+"When you upgrade, your balance moves to the new plan's full allocation minus what you've already used. Starter tokens are replaced by the paid plan — they don't stack on top. The good news is you immediately get access to the higher plan's token pool."
+
+---
+
+## Refuel Tokens
+- $20 = 5M tokens per pack
+- Buy multiple packs if needed
+- Don't expire while subscription is active
+- **When to recommend refuel vs upgrade**:
+
+| Situation | Recommendation |
+|---|---|
+| Finishing current project, won't need more soon | Refuel |
+| Running out of tokens every month | Upgrade plan |
+| On 2nd+ refuel this billing cycle | Upgrade (better value) |
+| Mid-project, unexpected scope increase | Refuel |
+
+---
+
+## Cancellation — What Users Lose
+When a user cancels their subscription:
+- ALL tokens (subscription + bonus + refuel) expire at billing cycle end
+- Projects and code remain accessible indefinitely
+- Cannot generate new code once tokens are zero
+- Private visibility on projects may revert to public
+
+**Always tell users before they cancel**: "Your code and projects stay accessible forever. But any unused tokens expire when your billing period ends. If you've got tokens left, use them before cancelling — or download your code first."
+
+---
+
+## Token Refund Policy
+- Tokens consumed in failed/broken generations: generally NOT auto-refunded
+- Tokens consumed in rolled-back versions: NOT refunded
+- **Fix It feature**: Free for paid users — no tokens consumed for Fix It
+- **Goodwill exceptions**: Support team can add bonus tokens for genuine platform failures — escalate to team with full context
+
+---
+
+## Annual Plan Gotcha (Warn Users Near Renewal)
+At annual renewal:
+- ALL unused tokens from the year **expire immediately**
+- Fresh 12-month balance starts
+- Unlike monthly plans, there's no indefinite rollover
+
+Tip: Remind annual subscribers 2 weeks before renewal to use up remaining tokens.
+
+---
+
+## Common Billing Q&A
+
+**Q: "My tokens expired — when does my plan reset?"**
+A: Paid monthly plans reset on your billing date each month. You can check this in Settings → Subscription.
+
+**Q: "I cancelled — when do tokens expire?"**
+A: At the END of your current billing cycle, not immediately.
+
+**Q: "I upgraded mid-month, what was I charged?"**
+A: A prorated charge for remaining days on the new plan, minus a credit for unused days on the old plan.
+
+**Q: "Why didn't my tokens go up when I upgraded from Starter?"**
+A: Starter tokens are replaced by the paid plan — not added. You get the paid plan's full allocation minus what you'd already used from Starter.
+
+**Q: "Can I get a refund?"**
+A: Escalate to team. Rocket has offered goodwill refunds in cases of platform failure. Not guaranteed but worth escalating for paying customers.
+
+**Q: "Do refuel tokens expire if I downgrade?"**
+A: Refuel tokens expire if you CANCEL. Downgrading is different — refuel tokens remain until cancellation.
+

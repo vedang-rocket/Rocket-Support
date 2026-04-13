@@ -1,0 +1,444 @@
+---
+description: >
+  supabase edge function background tasks EdgeRuntime.waitUntil, fire and forget async processing,
+  edge function websocket server OpenAI realtime API voice streaming,
+  supabase edge function built-in AI model gte-small free embeddings no API key,
+  supabase AI inference edge function Session.run, edge function write tmp files,
+  process large files edge function without memory limit, ephemeral storage edge function,
+  supabase MCP server edge function mcp-lite, build MCP server supabase,
+  edge function job queue pgmq background processing, openai realtime websocket edge function,
+  edge function respond immediately continue processing, ollama local AI models edge function,
+  beforeunload edge function save state, supabase edge function async response
+globs: ["**/supabase/functions/**", "**/*.ts"]
+alwaysApply: false
+---
+
+# Supabase Edge Functions — Advanced Features Reference
+
+---
+
+## Background Tasks — EdgeRuntime.waitUntil()
+
+**GA: December 2024**
+
+Respond to the user immediately, then continue processing in the background.
+The single most important pattern for AI apps — eliminates waiting for OpenAI calls.
+
+### Basic pattern
+```typescript
+Deno.serve(async (req: Request) => {
+  const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' }
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  const { documentId, content } = await req.json()
+
+  // ✅ Register background work BEFORE sending response
+  // This continues running after the response is sent
+  EdgeRuntime.waitUntil(
+    processInBackground(documentId, content)
+  )
+
+  // ✅ Respond immediately — user doesn't wait
+  return new Response(
+    JSON.stringify({ ok: true, message: 'Processing started' }),
+    { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+  )
+})
+
+async function processInBackground(documentId: string, content: string) {
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!  // service role — no user context
+    )
+
+    // Generate embedding (would exceed CPU limit if done synchronously)
+    const embedding = await generateEmbedding(content)
+
+    // Store in database
+    await supabase
+      .from('documents')
+      .update({ embedding, processed: true, processed_at: new Date().toISOString() })
+      .eq('id', documentId)
+
+    console.log(`Background: document ${documentId} embedded successfully`)
+  } catch (error) {
+    console.error(`Background: failed for ${documentId}:`, error)
+    // Consider updating a status field so UI can show the error
+  }
+}
+```
+
+### Background task limits
+```
+Free tier:  150 seconds after response sent
+Pro tier:   400 seconds after response sent
+
+Multiple waitUntil() calls are allowed — they all run in parallel
+Background tasks share the same 150MB memory budget
+```
+
+### Save state before shutdown (beforeunload)
+```typescript
+// Fires when Edge Runtime is shutting down — use to save progress
+addEventListener('beforeunload', async (ev) => {
+  console.log('Edge Runtime shutting down, reason:', ev.detail?.reason)
+  // Save checkpoint to DB so work can resume
+  await supabase.from('job_checkpoints').upsert({
+    job_id: currentJobId,
+    progress: currentProgress,
+    updated_at: new Date().toISOString(),
+  })
+})
+```
+
+### Job queue pattern (pgmq + Edge Function)
+```typescript
+// Edge Function: process-queue/index.ts
+// Called by pg_cron every 30 seconds via pg_net
+
+Deno.serve(async (req: Request) => {
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+
+  // Read up to 10 messages from pgmq queue
+  const { data: messages } = await supabase.rpc('pgmq_read', {
+    queue_name: 'embeddings_queue',
+    vt: 30,    // visibility timeout — message hidden from other workers for 30s
+    qty: 10,
+  })
+
+  if (!messages?.length) {
+    return new Response(JSON.stringify({ processed: 0 }))
+  }
+
+  // Process each message in background (don't block response)
+  EdgeRuntime.waitUntil(
+    Promise.all(messages.map(async (msg: any) => {
+      try {
+        const { document_id, content } = msg.message
+        const embedding = await generateEmbedding(content)
+        await supabase.from('documents')
+          .update({ embedding })
+          .eq('id', document_id)
+        // Delete from queue — successfully processed
+        await supabase.rpc('pgmq_delete', { queue_name: 'embeddings_queue', msg_id: msg.msg_id })
+      } catch (err) {
+        console.error('Queue processing error:', err)
+        // Message becomes visible again after vt expires — will be retried
+      }
+    }))
+  )
+
+  return new Response(JSON.stringify({ processing: messages.length }))
+})
+```
+
+---
+
+## WebSockets in Edge Functions
+
+**GA: December 2024**
+
+Edge Functions can act as WebSocket servers — bi-directional persistent connections.
+Primary use case: OpenAI Realtime API relay for voice/audio streaming.
+
+### WebSocket server basics
+```typescript
+// supabase/functions/ws-server/index.ts
+Deno.serve(async (req: Request) => {
+  // Check if client is requesting a WebSocket upgrade
+  const upgrade = req.headers.get('upgrade') ?? ''
+  if (upgrade.toLowerCase() !== 'websocket') {
+    return new Response('Expected WebSocket upgrade', { status: 426 })
+  }
+
+  // Upgrade the connection
+  const { socket, response } = Deno.upgradeWebSocket(req)
+
+  socket.onopen = () => {
+    console.log('Client connected')
+    socket.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }))
+  }
+
+  socket.onmessage = async (event) => {
+    const message = JSON.parse(event.data)
+    console.log('Received:', message)
+
+    // Process and respond
+    const result = await processMessage(message)
+    socket.send(JSON.stringify(result))
+  }
+
+  socket.onerror = (error) => console.error('WebSocket error:', error)
+  socket.onclose = () => console.log('Client disconnected')
+
+  return response
+})
+```
+
+### OpenAI Realtime API relay — voice/audio streaming
+```typescript
+// supabase/functions/realtime-relay/index.ts
+// Relays between browser client and OpenAI Realtime API
+// Required because: browser can't call OpenAI directly (exposes key), needs CORS relay
+
+Deno.serve(async (req: Request) => {
+  if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+    return new Response('WebSocket required', { status: 426 })
+  }
+
+  // Auth — WebSocket clients cannot send custom headers
+  // Use query param for token (less ideal but necessary)
+  const url = new URL(req.url)
+  const token = url.searchParams.get('token')
+
+  if (!token) {
+    return new Response('Unauthorized', { status: 401 })
+  }
+
+  // Validate token
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!,
+  )
+  const { data: { user }, error } = await supabase.auth.getUser(token)
+  if (error || !user) return new Response('Unauthorized', { status: 401 })
+
+  // Upgrade client connection
+  const { socket: clientSocket, response } = Deno.upgradeWebSocket(req)
+
+  // Connect to OpenAI Realtime API
+  const openaiWs = new WebSocket(
+    'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview',
+    ['realtime', `openai-insecure-api-key.${Deno.env.get('OPENAI_API_KEY')}`, 'openai-beta.realtime-v1']
+  )
+
+  // Relay: client → OpenAI
+  clientSocket.onmessage = (event) => {
+    if (openaiWs.readyState === WebSocket.OPEN) {
+      openaiWs.send(event.data)
+    }
+  }
+
+  // Relay: OpenAI → client
+  openaiWs.onmessage = (event) => {
+    if (clientSocket.readyState === WebSocket.OPEN) {
+      clientSocket.send(event.data)
+    }
+  }
+
+  clientSocket.onclose = () => openaiWs.close()
+  openaiWs.onclose = () => clientSocket.close()
+
+  return response
+})
+```
+
+### Client-side WebSocket connection (Next.js)
+```typescript
+// 'use client' component
+const connectVoice = async () => {
+  const { data: { session } } = await supabase.auth.getSession()
+
+  // Pass token as query param — WebSockets cannot send custom headers
+  const wsUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL!.replace('https', 'wss')}/functions/v1/realtime-relay?token=${session!.access_token}`
+
+  const ws = new WebSocket(wsUrl)
+
+  ws.onopen = () => console.log('Connected to realtime relay')
+  ws.onmessage = (event) => handleOpenAIMessage(JSON.parse(event.data))
+  ws.onerror = (err) => console.error('WebSocket error:', err)
+}
+```
+
+### Local dev config for WebSockets
+```toml
+# supabase/config.toml — required for WebSocket local development
+[edge_runtime]
+policy = "per_worker"  # keeps workers alive for persistent WebSocket connections
+# Default "oneshot" policy kills workers after each request — breaks WebSockets
+```
+
+---
+
+## Built-in AI Models — Free Embeddings
+
+Edge Functions have a built-in AI model runner — no API key needed, no cost per call.
+Available model: `gte-small` (384 dimensions, English text, fast, free).
+
+Compare to OpenAI text-embedding-3-small: lower quality but zero cost, zero latency penalty.
+Use case: search within your own content where perfect semantic accuracy is less critical.
+
+### Generate embeddings with built-in model
+```typescript
+// No imports needed — Session is a global in the Edge Runtime
+Deno.serve(async (req: Request) => {
+  const { text } = await req.json()
+
+  // Built-in model — runs locally in Edge Runtime, no external API call
+  const session = new Supabase.ai.Session('gte-small')
+  const embedding = await session.run(text, {
+    mean_pool: true,
+    normalize: true,
+  })
+
+  // embedding is a Float32Array of 384 dimensions
+  return new Response(JSON.stringify({ embedding: Array.from(embedding) }))
+})
+```
+
+### pgvector schema for built-in model (384 dimensions — NOT 1536)
+```sql
+-- If using built-in model, use 384 dimensions (not 1536)
+ALTER TABLE documents ADD COLUMN embedding_small VECTOR(384);
+
+CREATE OR REPLACE FUNCTION match_documents_small(
+  query_embedding VECTOR(384),
+  match_threshold FLOAT DEFAULT 0.78,
+  match_count INT DEFAULT 5
+)
+RETURNS TABLE(id BIGINT, content TEXT, similarity FLOAT)
+LANGUAGE sql STABLE AS $$
+  SELECT id, content, 1 - (embedding_small <=> query_embedding) AS similarity
+  FROM documents
+  WHERE 1 - (embedding_small <=> query_embedding) > match_threshold
+  ORDER BY embedding_small <=> query_embedding
+  LIMIT match_count;
+$$;
+```
+
+### When to use built-in vs OpenAI
+```
+Built-in (gte-small, 384 dims):
+  ✅ Free — zero cost per embedding
+  ✅ No API key needed
+  ✅ Faster (no external API call)
+  ✅ Good enough for: search within your own content, doc similarity, FAQ matching
+  ❌ English only
+  ❌ Lower quality than OpenAI for complex semantic tasks
+
+OpenAI (text-embedding-3-small, 1536 dims):
+  ✅ Higher quality semantic understanding
+  ✅ Multilingual
+  ✅ Better for: cross-language search, nuanced similarity
+  ❌ $0.02 per 1M tokens
+  ❌ External API call (~100-300ms)
+  ❌ Requires OPENAI_API_KEY secret
+```
+
+---
+
+## Ephemeral /tmp Storage
+
+Edge Functions can write to `/tmp` during execution.
+Files are cleared between invocations — NOT persistent storage.
+
+Use for: processing large files without loading into memory, intermediate steps.
+
+```typescript
+import { writeFile, readFile, unlink } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+Deno.serve(async (req: Request) => {
+  // Download a large file from Storage to /tmp (avoids loading 50MB into memory)
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+
+  const { data: fileData } = await supabase.storage
+    .from('uploads')
+    .download('large-document.pdf')
+
+  // Write to /tmp for processing
+  const tmpPath = join(tmpdir(), `doc-${Date.now()}.pdf`)
+  await writeFile(tmpPath, new Uint8Array(await fileData!.arrayBuffer()))
+
+  // Process the file (e.g., extract text, resize image, parse CSV)
+  const result = await processFile(tmpPath)
+
+  // Clean up (good practice — /tmp has limited space)
+  await unlink(tmpPath)
+
+  return new Response(JSON.stringify({ result }))
+})
+```
+
+---
+
+## MCP Server via mcp-lite
+
+Build a Model Context Protocol server in an Edge Function.
+AI agents (Claude, Cursor) can call your tools with user-level RLS enforcement.
+
+```typescript
+// supabase/functions/mcp/index.ts
+import { McpServer } from 'npm:@supabase/mcp-utils@latest'
+import { createClient } from 'jsr:@supabase/supabase-js@2'
+
+const server = new McpServer({ name: 'my-app-tools', version: '1.0.0' })
+
+server.tool('get_my_orders', 'Get authenticated user orders', {}, async (args, extra) => {
+  // Get user from the request context (set by Edge gateway auth)
+  const authHeader = extra.meta?.request?.headers?.get('authorization') ?? ''
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!,
+    { global: { headers: { Authorization: authHeader } } }
+  )
+
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return { content: [{ type: 'text', text: 'Unauthorized' }] }
+
+  // RLS applies — user only sees their own orders
+  const { data: orders } = await supabase
+    .from('orders')
+    .select('id, status, amount_cents, created_at')
+    .order('created_at', { ascending: false })
+    .limit(10)
+
+  return {
+    content: [{ type: 'text', text: JSON.stringify(orders, null, 2) }]
+  }
+})
+
+server.tool('search_products', 'Semantic product search', {
+  query: { type: 'string', description: 'Search query' }
+}, async ({ query }) => {
+  // Use built-in AI model — no API key needed
+  const session = new Supabase.ai.Session('gte-small')
+  const embedding = await session.run(query, { mean_pool: true, normalize: true })
+
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!
+  )
+
+  const { data } = await supabase.rpc('match_products', {
+    query_embedding: Array.from(embedding),
+    match_count: 5,
+  })
+
+  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+})
+
+Deno.serve(server.handle.bind(server))
+```
+
+```json
+// .cursor/mcp.json — connect Cursor to your Edge Function MCP
+{
+  "mcpServers": {
+    "my-app": {
+      "url": "https://[PROJECT_REF].functions.supabase.co/mcp",
+      "headers": {
+        "Authorization": "Bearer [USER_ACCESS_TOKEN]"
+      }
+    }
+  }
+}
+```

@@ -1,0 +1,280 @@
+---
+description: >
+  supabase email template customise variables, supabase redirect URL wildcard netlify,
+  supabase password security weak password error breach detection HaveIBeenPwned,
+  supabase custom SMTP Resend SendGrid auth emails, supabase auth audit logs,
+  supabase disable email confirmation development, supabase JWT expiry setting,
+  supabase disable sign ups closed beta, supabase email template ConfirmationURL Token,
+  supabase auth going to spam custom SMTP setup, supabase redirect URL OAuth broken deploy,
+  supabase site URL vs redirect URL, supabase double confirm email change,
+  supabase auth configuration first day settings, WeakPasswordError supabase handle
+globs: ["**/*.ts", "**/*.tsx"]
+alwaysApply: false
+---
+
+# Supabase Auth — Configuration Reference
+
+---
+
+## First-Day Settings (configure before first user signs up)
+
+```
+Supabase Dashboard → Authentication → Settings (Providers) → Email
+
+Key settings to configure on every new project:
+
+1. Confirm email: ON for production, OFF for development
+   → OFF = users can sign in immediately without confirming email
+   → Always turn ON before going to production
+
+2. Secure password change: ON (always)
+   → Requires users to re-verify old email before changing to new email
+   → Prevents account takeover via email change
+
+3. Double confirm changes: ON (recommended)
+   → Both old and new email must confirm before email address changes
+   → Without this: user can change email to attacker's email silently
+
+4. Enable sign-ups: ON for open beta, OFF for closed beta or post-launch
+   → Dashboard → Auth → Settings → User Signups → Disable sign-ups
+   → Existing users can still sign in; new registrations rejected
+
+5. JWT expiry: 3600 (1hr default)
+   → Lower = more secure but more network calls for refresh
+   → 300 (5min) for high-security apps
+   → Never set below 60 seconds (causes UI flicker from constant refresh)
+```
+
+---
+
+## Email Templates — Variables and Common Bugs
+
+All template variables use Go template syntax: `{{ .VariableName }}`
+
+```
+Dashboard → Auth → Email Templates
+
+Available variables:
+  {{ .ConfirmationURL }}  — full confirmation link (for confirm, invite, recovery)
+  {{ .Token }}            — 6-digit OTP code (for OTP/magic link flows)
+  {{ .TokenHash }}        — hashed token (for custom redirect implementations)
+  {{ .SiteURL }}          — your site URL from auth settings
+  {{ .Email }}            — user's email address
+  {{ .NewEmail }}         — new email (for email change confirmation)
+  {{ .RedirectTo }}       — the redirect URL passed with the auth call
+```
+
+### Common template bugs
+
+```html
+<!-- BUG: Using {{ .ConfirmationURL }} for magic link / OTP login -->
+<!-- This sends a link — but if you're using OTP flow, user expects a CODE -->
+<p>Your code is: {{ .ConfirmationURL }}</p>  <!-- WRONG — shows a URL not a code -->
+
+<!-- CORRECT for OTP flow -->
+<p>Your login code is: <strong>{{ .Token }}</strong></p>
+<p>This code expires in 10 minutes.</p>
+
+<!-- CORRECT for magic link / confirm email flow -->
+<p><a href="{{ .ConfirmationURL }}">Confirm your email</a></p>
+
+<!-- BUG: Hardcoding your domain — breaks staging/preview URLs -->
+<a href="https://myapp.com/confirm?token={{ .Token }}">Confirm</a>  <!-- WRONG -->
+
+<!-- CORRECT — use SiteURL variable -->
+<a href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&type=email">Confirm</a>
+```
+
+### Minimal working email template
+```html
+<!DOCTYPE html>
+<html>
+<body style="font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px;">
+  <h2>{{ if eq .Type "signup" }}Confirm your email{{ else if eq .Type "recovery" }}Reset your password{{ else }}Sign in{{ end }}</h2>
+
+  {{ if .Token }}
+    <p>Your verification code:</p>
+    <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 20px 0;">
+      {{ .Token }}
+    </div>
+    <p style="color: #666;">This code expires in 10 minutes.</p>
+  {{ else }}
+    <p><a href="{{ .ConfirmationURL }}"
+       style="background: #1a1a1a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">
+      Click to confirm
+    </a></p>
+  {{ end }}
+
+  <p style="color: #999; font-size: 13px;">If you didn't request this, you can ignore this email.</p>
+</body>
+</html>
+```
+
+---
+
+## Redirect URLs — Wildcards and Common Mistakes
+
+```
+Dashboard → Auth → URL Configuration
+
+Site URL: https://yourdomain.com
+(Used as the base for relative redirects and email template {{ .SiteURL }})
+
+Redirect URLs — must add ALL of these for typical Rocket project:
+  http://localhost:3000/**
+  https://yourdomain.com/**
+  https://*.netlify.app/**        ← wildcard for Netlify preview deploys
+  https://yourdomain.netlify.app/**
+```
+
+### Wildcard syntax
+```
+*        — matches any single path segment (no slashes)
+**       — matches any path including slashes (use this for most cases)
+
+Examples:
+  https://myapp.netlify.app/**  → matches any path on this domain
+  https://*.netlify.app/**      → matches ANY Netlify subdomain (all preview deploys)
+  https://myapp.com/**          → matches any path on custom domain
+```
+
+### Why OAuth breaks on deploy (and how to fix it)
+```
+Symptom: OAuth works on localhost, fails after Netlify deploy
+Cause:   redirect URL mismatch — the callback URL is not in the allowed list
+
+Fix checklist:
+1. Add https://yourdomain.netlify.app/auth/callback to redirect URLs
+2. Add https://*.netlify.app/** for preview deploy support
+3. Set Site URL to your production domain (not localhost)
+4. Check the redirectTo option in signInWithOAuth() matches exactly
+```
+
+```typescript
+// Always use window.location.origin for the redirectTo — adapts to any environment
+const { error } = await supabase.auth.signInWithOAuth({
+  provider: 'google',
+  options: {
+    redirectTo: `${window.location.origin}/auth/callback`,
+    // Do NOT hardcode: redirectTo: 'https://myapp.com/auth/callback'
+    // It breaks on localhost and preview URLs
+  },
+})
+```
+
+---
+
+## Password Security
+
+### Strength settings
+```
+Dashboard → Auth → Settings → Password → Minimum password length (default: 6)
+Dashboard → Auth → Settings → Password → Required characters (lowercase, uppercase, digits, symbols)
+```
+
+### HaveIBeenPwned breach detection (Pro plan)
+```
+Dashboard → Auth → Settings → Password → Check for leaked passwords → Enable
+
+When enabled: Supabase checks new passwords against HaveIBeenPwned.org database
+If password found in breach data → rejected with WeakPasswordError
+User sees: "This password has been found in a data breach. Please choose a different password."
+```
+
+### Handle WeakPasswordError in your code
+```typescript
+import { AuthWeakPasswordError } from '@supabase/supabase-js'
+
+const { data, error } = await supabase.auth.signUp({ email, password })
+
+if (error instanceof AuthWeakPasswordError) {
+  // error.message tells you WHY it's weak
+  // error.reasons is an array: ['characters', 'leaked', 'length']
+  const reasons = error.reasons ?? []
+
+  if (reasons.includes('leaked')) {
+    setError('This password has appeared in a data breach. Please choose another.')
+  } else if (reasons.includes('length')) {
+    setError(`Password must be at least ${error.status} characters.`)
+  } else if (reasons.includes('characters')) {
+    setError('Password must include uppercase, lowercase, a number, and a symbol.')
+  } else {
+    setError(error.message)
+  }
+  return
+}
+```
+
+---
+
+## Custom SMTP — Stop Auth Emails Going to Spam
+
+Default Supabase emails come from `noreply@mail.supabase.io` — treated as spam by most email clients. Every production project must configure custom SMTP.
+
+### Setup with Resend (recommended — most Rocket projects already have Resend)
+```
+1. Resend Dashboard → Domains → Add Domain → verify your domain
+2. Resend Dashboard → API Keys → Create API Key → copy it
+3. Resend SMTP credentials:
+   Host:     smtp.resend.com
+   Port:     465 (SSL) or 587 (TLS)
+   Username: resend
+   Password: [your Resend API key]
+   Sender:   noreply@yourdomain.com
+
+4. Supabase Dashboard → Auth → SMTP Settings → Enable Custom SMTP
+   Fill in the above credentials
+   Sender email: noreply@yourdomain.com
+   Sender name:  [Your App Name]
+
+5. Test: Auth → SMTP → Send test email
+```
+
+### Common SMTP errors
+```
+"535 Authentication failed" → wrong API key or username is not "resend"
+"550 Sender not verified" → domain not verified in Resend dashboard
+"Connection timeout" → wrong port (try 587 if 465 fails)
+Emails still not arriving → check Resend dashboard → Logs for delivery status
+```
+
+---
+
+## Auth Audit Logs — Diagnose Auth Failures
+
+```
+Supabase Dashboard → Auth → Logs
+
+Events logged:
+  user.signed_in         — successful sign in (with provider)
+  user.signed_out        — sign out
+  user.signed_up         — new user registration
+  token.refreshed        — access token silently refreshed
+  user.password_recovery — password reset link clicked
+  user.email_change      — email changed
+  user.updated           — user metadata updated
+  mfa.challenge_verified — MFA code verified
+  mfa.factor_added       — new MFA factor enrolled
+```
+
+```
+Using logs to diagnose "user says they can't log in":
+1. Filter by user email
+2. Look for sign_in events → check for failure events before them
+3. Check if email_not_confirmed error appears
+4. Check for rate limit events (too many failed attempts)
+5. Check timestamp of last token.refreshed — if old, session expired naturally
+```
+
+---
+
+## Enterprise SSO (SAML — one-liner reference)
+
+```
+Available on: Team and Enterprise plans only
+Use case: B2B SaaS where enterprise customers require SAML SSO
+Providers: Okta, Azure AD, Google Workspace, any SAML 2.0 provider
+
+Setup: Dashboard → Auth → SSO Providers → Add provider
+Docs: supabase.com/docs/guides/auth/enterprise-sso
+```

@@ -1,0 +1,438 @@
+---
+description: >
+  RAG retrieval augmented generation supabase nextjs, build AI chatbot supabase,
+  document chunking embedding strategy, supabase vector search with permissions RLS,
+  RAG user scoped documents access control, hybrid search semantic keyword combined,
+  RRF reciprocal rank fusion supabase, automatic embeddings trigger pg_net supabase,
+  full RAG pipeline retrieve augment generate stream, document_sections chunks embedding,
+  openai chat completions RAG context, stream AI response nextjs edge function,
+  supabase AI Q&A search documentation, keyword search ts_rank scoring supabase,
+  RAG with row level security user owned documents, langchain alternative supabase RAG
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase — Complete RAG Pipeline Reference
+
+RAG (Retrieval Augmented Generation) = let an LLM answer questions using YOUR data.
+The pipeline: chunk documents → embed chunks → store in pgvector → retrieve relevant chunks → build prompt → generate answer → stream to user.
+
+---
+
+## Schema: Documents + Sections (NOT one flat table)
+
+```sql
+-- Parent: one row per source document
+CREATE TABLE documents (
+  id          BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  name        TEXT NOT NULL,
+  storage_object_id UUID REFERENCES storage.objects(id) ON DELETE CASCADE,
+  created_by  UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Child: one row per chunk — this is what gets embedded
+CREATE TABLE document_sections (
+  id          BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  content     TEXT NOT NULL,
+  embedding   VECTOR(1536),        -- OpenAI text-embedding-3-small dimensions
+  token_count INT,                 -- track token usage
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable RLS on BOTH tables
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_sections ENABLE ROW LEVEL SECURITY;
+
+-- HNSW index for fast similarity search
+CREATE INDEX ON document_sections USING hnsw (embedding vector_cosine_ops);
+```
+
+---
+
+## Document Chunking — The Most Critical Step
+
+Embedding entire documents produces poor results. Chunk first.
+
+```typescript
+// lib/chunker.ts
+export function chunkText(text: string, options = {
+  chunkSize: 800,      // characters per chunk
+  overlap: 100,        // characters of overlap between chunks
+}): string[] {
+  const { chunkSize, overlap } = options
+  const chunks: string[] = []
+  let start = 0
+
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length)
+    let chunk = text.slice(start, end)
+
+    // Try to break at sentence boundary (don't cut mid-sentence)
+    if (end < text.length) {
+      const lastPeriod = chunk.lastIndexOf('. ')
+      const lastNewline = chunk.lastIndexOf('\n')
+      const breakAt = Math.max(lastPeriod, lastNewline)
+      if (breakAt > chunkSize * 0.5) {
+        chunk = text.slice(start, start + breakAt + 1)
+      }
+    }
+
+    if (chunk.trim().length > 50) chunks.push(chunk.trim())
+    start += chunk.length - overlap
+  }
+
+  return chunks
+}
+
+// Chunking guidelines:
+// 800-1000 chars = good for prose/articles (fits ~500 tokens)
+// 400-600 chars = better for code/technical docs
+// 100 char overlap = prevents splitting important context at boundaries
+```
+
+---
+
+## Complete RAG Pipeline
+
+### Step 1 — Ingest: chunk, embed, store
+
+```typescript
+// app/api/documents/ingest/route.ts
+import { chunkText } from '@/lib/chunker'
+import { generateEmbedding } from '@/lib/embeddings'
+import { createClient } from '@/lib/supabase/server'
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { documentName, content } = await request.json()
+
+  // 1. Create parent document record
+  const { data: doc, error: docErr } = await supabase
+    .from('documents')
+    .insert({ name: documentName, created_by: user.id })
+    .select().single()
+  if (docErr) return Response.json({ error: docErr.message }, { status: 500 })
+
+  // 2. Chunk the content
+  const chunks = chunkText(content)
+
+  // 3. Embed each chunk and insert
+  const sections = await Promise.all(
+    chunks.map(async (chunk, i) => ({
+      document_id: doc.id,
+      content: chunk,
+      embedding: await generateEmbedding(chunk),
+    }))
+  )
+
+  const { error: sectErr } = await supabase
+    .from('document_sections')
+    .insert(sections)
+
+  if (sectErr) return Response.json({ error: sectErr.message }, { status: 500 })
+  return Response.json({ documentId: doc.id, chunks: chunks.length })
+}
+```
+
+### Step 2 — Retrieve: match function with RLS
+
+```sql
+-- Match function respects RLS via SECURITY INVOKER (default)
+CREATE OR REPLACE FUNCTION match_document_sections(
+  query_embedding VECTOR(1536),
+  match_threshold FLOAT DEFAULT 0.78,
+  match_count     INT   DEFAULT 5,
+  in_document_ids BIGINT[] DEFAULT NULL  -- optional: filter to specific docs
+)
+RETURNS TABLE(id BIGINT, content TEXT, similarity FLOAT, document_id BIGINT)
+LANGUAGE sql STABLE SECURITY INVOKER AS $$
+  SELECT
+    ds.id,
+    ds.content,
+    1 - (ds.embedding <=> query_embedding) AS similarity,
+    ds.document_id
+  FROM document_sections ds
+  WHERE ds.embedding IS NOT NULL
+    AND (in_document_ids IS NULL OR ds.document_id = ANY(in_document_ids))
+    AND 1 - (ds.embedding <=> query_embedding) > match_threshold
+  ORDER BY ds.embedding <=> query_embedding
+  LIMIT match_count;
+$$;
+```
+
+### Step 3 — Augment: build context prompt
+
+```typescript
+// lib/rag.ts
+import { generateEmbedding } from '@/lib/embeddings'
+
+export async function retrieveContext(supabase: any, question: string, maxChunks = 5) {
+  const queryEmbedding = await generateEmbedding(question)
+
+  const { data: sections, error } = await supabase.rpc('match_document_sections', {
+    query_embedding: queryEmbedding,
+    match_threshold: 0.75,
+    match_count: maxChunks,
+  })
+
+  if (error || !sections?.length) return null
+
+  // Build context string from retrieved chunks
+  const context = sections
+    .map((s: any, i: number) => `[Source ${i + 1}]:\n${s.content}`)
+    .join('\n\n---\n\n')
+
+  return context
+}
+
+export function buildRAGPrompt(question: string, context: string): string {
+  return `You are a helpful assistant. Answer the question based ONLY on the provided context.
+If the context does not contain enough information, say "I don't have enough information to answer that."
+
+Context:
+${context}
+
+Question: ${question}
+
+Answer:`
+}
+```
+
+### Step 4 — Generate + Stream response
+
+```typescript
+// app/api/chat/route.ts
+import { OpenAI } from 'openai'
+import { retrieveContext, buildRAGPrompt } from '@/lib/rag'
+import { createClient } from '@/lib/supabase/server'
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { question } = await request.json()
+
+  // Retrieve relevant context (RLS enforced via server client)
+  const context = await retrieveContext(supabase, question)
+  if (!context) {
+    return Response.json({ answer: "I don't have any relevant documents to answer that." })
+  }
+
+  const prompt = buildRAGPrompt(question, context)
+
+  // Stream the response back to the client
+  const stream = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',      // cheapest capable model
+    messages: [{ role: 'user', content: prompt }],
+    stream: true,
+    max_tokens: 500,
+  })
+
+  // Return a streaming response
+  const encoder = new TextEncoder()
+  const readable = new ReadableStream({
+    async start(controller) {
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content ?? ''
+        if (text) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`))
+      }
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+      controller.close()
+    }
+  })
+
+  return new Response(readable, {
+    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
+  })
+}
+```
+
+```typescript
+// Client: consume the SSE stream
+// 'use client' component
+const askQuestion = async (question: string) => {
+  setAnswer('')
+  const response = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question }),
+  })
+
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const chunk = decoder.decode(value)
+    const lines = chunk.split('\n').filter(l => l.startsWith('data: '))
+    for (const line of lines) {
+      const data = line.replace('data: ', '')
+      if (data === '[DONE]') break
+      const { text } = JSON.parse(data)
+      setAnswer(prev => prev + text)
+    }
+  }
+}
+```
+
+---
+
+## RAG with RLS Permissions
+
+### Pattern 1 — User-owned documents (most common)
+```sql
+-- Users can only search their own document sections
+CREATE POLICY "users_own_sections" ON document_sections FOR SELECT
+USING (
+  EXISTS (
+    SELECT 1 FROM documents d
+    WHERE d.id = document_sections.document_id
+      AND d.created_by = auth.uid()
+  )
+);
+
+CREATE POLICY "users_own_documents" ON documents FOR ALL
+USING (created_by = auth.uid());
+```
+
+### Pattern 2 — Shared document access via permissions table
+```sql
+CREATE TABLE document_permissions (
+  document_id BIGINT REFERENCES documents(id) ON DELETE CASCADE,
+  user_id     UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  PRIMARY KEY (document_id, user_id)
+);
+
+ALTER TABLE document_permissions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "sections_with_permission" ON document_sections FOR SELECT
+USING (
+  EXISTS (
+    SELECT 1 FROM document_permissions dp
+    WHERE dp.document_id = document_sections.document_id
+      AND dp.user_id = auth.uid()
+  )
+  OR EXISTS (
+    SELECT 1 FROM documents d
+    WHERE d.id = document_sections.document_id
+      AND d.created_by = auth.uid()
+  )
+);
+```
+
+---
+
+## Hybrid Search — Semantic + Keyword Combined
+
+```sql
+-- Hybrid search using RRF (Reciprocal Rank Fusion)
+-- Combines pgvector similarity with full-text search rankings
+CREATE OR REPLACE FUNCTION hybrid_search(
+  query_text        TEXT,
+  query_embedding   VECTOR(1536),
+  match_count       INT DEFAULT 10,
+  full_text_weight  FLOAT DEFAULT 1.0,
+  semantic_weight   FLOAT DEFAULT 1.0,
+  rrf_k             INT DEFAULT 50
+)
+RETURNS TABLE(id BIGINT, content TEXT, document_id BIGINT, rrf_score FLOAT)
+LANGUAGE sql STABLE SECURITY INVOKER AS $$
+WITH
+  -- Full-text search ranked results
+  fts AS (
+    SELECT id, content, document_id,
+           ROW_NUMBER() OVER (ORDER BY ts_rank(to_tsvector('english', content),
+                                               websearch_to_tsquery('english', query_text)) DESC) AS rank
+    FROM document_sections
+    WHERE to_tsvector('english', content) @@ websearch_to_tsquery('english', query_text)
+    LIMIT match_count * 2
+  ),
+  -- Semantic search ranked results
+  semantic AS (
+    SELECT id, content, document_id,
+           ROW_NUMBER() OVER (ORDER BY embedding <=> query_embedding) AS rank
+    FROM document_sections
+    WHERE embedding IS NOT NULL
+    ORDER BY embedding <=> query_embedding
+    LIMIT match_count * 2
+  )
+SELECT
+  COALESCE(fts.id, semantic.id)                AS id,
+  COALESCE(fts.content, semantic.content)      AS content,
+  COALESCE(fts.document_id, semantic.document_id) AS document_id,
+  -- RRF formula: weight / (k + rank)
+  COALESCE(1.0 / (rrf_k + fts.rank), 0)    * full_text_weight +
+  COALESCE(1.0 / (rrf_k + semantic.rank), 0) * semantic_weight AS rrf_score
+FROM fts
+FULL OUTER JOIN semantic ON fts.id = semantic.id
+ORDER BY rrf_score DESC
+LIMIT match_count;
+$$;
+```
+
+```typescript
+// Call hybrid search
+const { data } = await supabase.rpc('hybrid_search', {
+  query_text: question,
+  query_embedding: queryEmbedding,
+  match_count: 5,
+})
+```
+
+---
+
+## Automatic Embeddings via Trigger + pg_net
+
+```sql
+-- Auto-embed when a document_section is inserted (no manual API call needed)
+CREATE OR REPLACE FUNCTION trigger_embed_section()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  -- Call Edge Function to generate embedding async (pg_net — non-blocking)
+  PERFORM net.http_post(
+    url     := current_setting('app.supabase_url') || '/functions/v1/embed-section',
+    headers := jsonb_build_object(
+      'Content-Type',  'application/json',
+      'Authorization', 'Bearer ' || current_setting('app.service_role_key')
+    ),
+    body    := jsonb_build_object('sectionId', NEW.id, 'content', NEW.content)
+  );
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER on_section_inserted
+  AFTER INSERT ON document_sections
+  FOR EACH ROW WHEN (NEW.embedding IS NULL)
+  EXECUTE FUNCTION trigger_embed_section();
+```
+
+```typescript
+// supabase/functions/embed-section/index.ts
+Deno.serve(async (req) => {
+  const { sectionId, content } = await req.json()
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SECRET_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+
+  // Use built-in model (free) or OpenAI
+  const session = new Supabase.ai.Session('gte-small')
+  const embedding = await session.run(content, { mean_pool: true, normalize: true })
+
+  await supabase.from('document_sections')
+    .update({ embedding: Array.from(embedding) })
+    .eq('id', sectionId)
+
+  return new Response(JSON.stringify({ ok: true }))
+})
+```

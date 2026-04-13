@@ -1,0 +1,197 @@
+---
+description: >
+  supabase branching preview deployments CI/CD, supabase branch per pull request,
+  supabase GitHub integration branch create PR, supabase config.toml per environment,
+  netlify deploy preview supabase branch, supabase migrations CI/CD GitHub Actions,
+  supabase db push on merge, seed.sql per environment, supabase branching setup,
+  supabase preview branch credentials, multiple environments supabase dev staging prod,
+  supabase branch delete cleanup, supabase persistent branch ephemeral branch
+globs: ["**/*.ts", "**/*.tsx", "**/supabase/**", "**/.github/**"]
+alwaysApply: false
+---
+
+# Supabase Branching & CI/CD Reference
+
+Supabase Branching creates an isolated database copy per PR — schema, data, and config.
+Requires Pro plan. Prevents running migrations directly against production.
+
+---
+
+## Why Branching Matters
+
+```
+Without branching (what most Rocket projects do):
+  Developer pushes code → Netlify deploys → migrations run against PRODUCTION DB
+  If migration fails: production is broken
+  If migration has bad data: production data corrupted
+
+With branching:
+  Developer opens PR → Supabase creates isolated DB branch
+  Netlify preview deploy connects to the branch DB
+  Migrations tested on branch first
+  On merge to main: migrations run against staging/production only after passing
+```
+
+---
+
+## Setup: GitHub Integration
+
+```
+1. Dashboard → Project Settings → Integrations → GitHub
+   → Connect repository
+   → Enable "Create branches for pull requests"
+
+2. Supabase creates a branch automatically when:
+   - A PR is opened against main/master
+   - Manual: supabase branches create --name feature/my-feature
+
+3. Each branch gets:
+   - Its own Postgres DB (isolated from production)
+   - Its own API URL and keys (auto-generated)
+   - Copied schema from main branch at creation time
+   - Empty data (unless seed.sql is configured)
+```
+
+---
+
+## config.toml — Per-Environment Configuration
+
+```toml
+# supabase/config.toml
+# Settings here apply to ALL environments unless overridden in [remotes.*]
+
+[auth]
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["https://localhost:3000"]
+jwt_expiry = 3600
+enable_signup = true
+
+[auth.email]
+enable_confirmations = false   # disabled for local dev
+
+# Override for staging branch
+[remotes.staging]
+project_id = "your-staging-project-ref"
+
+[remotes.staging.auth]
+site_url = "https://staging.yourdomain.com"
+enable_confirmations = true
+
+# Override for production (set via CI, not config.toml for security)
+# NEVER put production project_id in config.toml committed to git
+```
+
+---
+
+## Netlify + Supabase Branch Wiring
+
+```bash
+# netlify.toml
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+# Branch deploys automatically use Supabase branch credentials
+# Netlify integration (Dashboard → Integrations → Netlify) handles this:
+#   - PR deploy → branch DB credentials injected as env vars
+#   - Production deploy → production DB credentials
+# No manual env var management needed when integration is enabled
+```
+
+```
+Setup:
+Dashboard → Project Settings → Integrations → Netlify → Connect site
+→ Supabase automatically injects SUPABASE_URL and SUPABASE_ANON_KEY
+  (or new key names) into each Netlify deploy context
+```
+
+---
+
+## GitHub Actions — Migration CI/CD
+
+```yaml
+# .github/workflows/supabase-migrate.yml
+name: Supabase Migrations
+
+on:
+  push:
+    branches: [main]
+    paths: ['supabase/migrations/**']
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to project
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Run migrations
+        run: supabase db push --password ${{ secrets.SUPABASE_DB_PASSWORD }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+```
+
+```bash
+# Required GitHub secrets (set in repo Settings → Secrets):
+SUPABASE_ACCESS_TOKEN   # from supabase.com/dashboard/account/tokens
+SUPABASE_PROJECT_REF    # your production project ref
+SUPABASE_DB_PASSWORD    # from Dashboard → Settings → Database → Database password
+```
+
+---
+
+## Seed Data Per Environment
+
+```sql
+-- supabase/seed.sql — runs after every db reset (local dev only)
+-- For branch seeds, use supabase/seed.sql OR create branch-specific seeds
+
+INSERT INTO public.profiles (id, full_name, email)
+VALUES
+  ('00000000-0000-0000-0000-000000000001', 'Test User',  'test@example.com'),
+  ('00000000-0000-0000-0000-000000000002', 'Admin User', 'admin@example.com');
+
+INSERT INTO public.user_roles (user_id, role)
+VALUES
+  ('00000000-0000-0000-0000-000000000001', 'member'),
+  ('00000000-0000-0000-0000-000000000002', 'admin');
+```
+
+```bash
+# Apply seed to a branch (creates test data without touching production)
+supabase db reset --linked   # resets branch DB + applies seed.sql
+
+# Branch management
+supabase branches list
+supabase branches create --name feature/add-teams
+supabase branches delete feature/add-teams --confirm
+
+# Get branch credentials (for manual wiring)
+supabase branches get feature/add-teams
+```
+
+---
+
+## Branch Types
+
+| Type | Lifecycle | Use for |
+|---|---|---|
+| Ephemeral | Created on PR open, deleted on PR close | Feature branches, bug fixes |
+| Persistent | Never deleted automatically | Staging environment |
+
+```bash
+# Create a persistent staging branch
+supabase branches create --name staging --persistent
+
+# Point your staging Netlify site to this branch
+# Dashboard → Branching → staging → copy API URL and keys
+```

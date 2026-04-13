@@ -1,0 +1,11 @@
+{
+  "name": "rocket-cursor-rules",
+  "version": "32.0.0",
+  "description": "Cursor IDE configuration for Rocket.new Next.js + Supabase projects",
+  "scripts": {
+    "test":     "cd tests && npm install --silent && npm test",
+    "promote":  "node .cursor/hooks/instinct-promoter.js",
+    "promote:status": "node .cursor/hooks/instinct-promoter.js --status"
+  },
+  "engines": { "node": ">=18" }
+}

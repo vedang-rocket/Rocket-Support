@@ -1,0 +1,422 @@
+---
+description: >
+  supabase realtime private channels authorization, realtime.messages RLS policy,
+  supabase channel private true authorization, realtime broadcast presence security,
+  supabase realtime connection leak too many connections, removeChannel cleanup react,
+  supabase realtime limits concurrent connections events per second plan,
+  supabase realtime project suspended too many connections, realtime channel SUBSCRIBED TIMED_OUT CHANNEL_ERROR,
+  supabase realtime disconnected mobile browser reconnect, server side broadcast HTTP API,
+  supabase broadcast from edge function server, realtime.broadcast_changes trigger postgres,
+  supabase realtime high frequency throttle eventsPerSecond, cursor tracking realtime performance,
+  broadcast vs postgres changes when to use, realtime.topic helper RLS policy
+globs: ["**/*.ts", "**/*.tsx"]
+alwaysApply: false
+---
+
+# Supabase Realtime — Production Reference
+
+> V26 covered Broadcast/Presence/Postgres Changes basics.
+> This file covers security, limits, cleanup, reconnection, and advanced patterns.
+
+---
+
+## ⚠️ Private Channels — REQUIRED for Production
+
+**Default channels are PUBLIC** — anyone with your anon key can subscribe to ANY channel.
+For any app with user-specific data (chat, notifications, private rooms), you MUST use private channels.
+
+### Step 1 — Enable authorization in Realtime Settings
+```
+Supabase Dashboard → Realtime → Settings
+  "Allow Public Access" → OFF (forces all channels to require authorization)
+```
+
+### Step 2 — Enable RLS on realtime.messages
+```sql
+-- Run once in SQL Editor
+ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
+```
+
+### Step 3 — Write RLS policies for each channel type
+
+The `realtime.topic()` function returns the channel name from the WebSocket join.
+Use it to build room-based access control.
+
+```sql
+-- BROADCAST: users can send and receive in channels matching their user_id
+-- (e.g., channel name = 'user:abc-uuid' → only that user can access)
+CREATE POLICY "broadcast_self_only"
+ON realtime.messages
+FOR ALL  -- covers INSERT (send) and SELECT (receive)
+USING (
+  realtime.messages.extension = 'broadcast'
+  AND (
+    -- User-specific channel: 'user:{user_id}'
+    realtime.topic() = 'user:' || (SELECT auth.uid()::TEXT)
+    -- OR room-based: check if user is member of the room
+    -- OR EXISTS (SELECT 1 FROM room_members WHERE room_id = split_part(realtime.topic(), ':', 2)::UUID AND user_id = auth.uid())
+  )
+);
+
+-- PRESENCE: similar pattern — who can track presence in a channel
+CREATE POLICY "presence_authenticated"
+ON realtime.messages
+FOR ALL
+USING (
+  realtime.messages.extension = 'presence'
+  AND auth.role() = 'authenticated'
+);
+
+-- POSTGRES CHANGES: covered separately via table-level RLS (not realtime.messages)
+```
+
+### Step 4 — Create private channel in your code
+```typescript
+// 'use client' component
+const channel = supabase.channel('user:' + user.id, {
+  config: {
+    private: true,    // ← REQUIRED for authorization to be enforced
+  },
+})
+
+// For a room-based chat app:
+const channel = supabase.channel(`room:${roomId}`, {
+  config: { private: true },
+})
+```
+
+---
+
+## Hard Limits — Know These Before Scaling
+
+| Limit | Free | Pro | Notes |
+|---|---|---|---|
+| Concurrent connections | 200 | 500 | Per PROJECT (not per user) |
+| Events/second | 100 | 500 | Across all channels |
+| Max channels per client | 100 | 100 | Per WebSocket connection |
+| Message size | 1 MB | 1 MB | Hard limit — larger messages silently dropped |
+| Postgres Changes joins per client | 2 | 10 | Separate limit for DB listeners |
+
+### Error codes when limits hit
+```
+too_many_channels     — client has too many channels open
+too_many_connections  — project hit concurrent connection limit
+too_many_joins        — too many Postgres Changes listeners
+rate_limited          — events/second exceeded
+```
+
+**Supabase CAN suspend your project for chronic limit violations.** They send a warning first.
+
+---
+
+## Connection Leaks — The #1 Cause of Project Suspension
+
+Every React component that creates a Realtime channel MUST clean it up on unmount.
+Without cleanup, every re-render creates a new persistent WebSocket connection.
+
+```typescript
+// ❌ WRONG — connection leak
+useEffect(() => {
+  const channel = supabase.channel('messages')
+  channel.on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, handler)
+  channel.subscribe()
+  // No cleanup — connection accumulates on every re-render
+}, [])
+
+// ✅ CORRECT — always return cleanup function
+useEffect(() => {
+  const channel = supabase.channel('messages')
+
+  channel
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, handler)
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') console.log('Connected to realtime')
+      if (status === 'CHANNEL_ERROR') console.error('Check RLS policies on realtime.messages')
+    })
+
+  // ← THIS IS CRITICAL — runs when component unmounts or deps change
+  return () => {
+    supabase.removeChannel(channel)
+  }
+}, [roomId])  // re-run and cleanup if roomId changes
+```
+
+### Diagnosing too many connections
+```typescript
+// In browser console — check active channels
+console.log(supabase.getChannels())  // should be low number
+// If growing over time → missing removeChannel() somewhere
+
+// Or in Supabase Dashboard → Realtime → Reports
+// Shows connection count over time — spike pattern = leak
+```
+
+---
+
+## Subscribe Status — Handle All States
+
+```typescript
+channel.subscribe((status, err) => {
+  switch (status) {
+    case 'SUBSCRIBED':
+      // ✅ Connected and receiving events
+      setConnectionState('connected')
+      break
+
+    case 'TIMED_OUT':
+      // ⚠️ Connection attempt timed out — retry
+      // Often caused by Node.js version incompatibility or network issues
+      console.warn('Realtime timed out, retrying...')
+      setConnectionState('connecting')
+      setTimeout(() => channel.subscribe(), 2000)
+      break
+
+    case 'CHANNEL_ERROR':
+      // ❌ Authorization failed — check RLS policies
+      // If using private: true → check realtime.messages policies
+      // If using postgres_changes → check table RLS + schema grants
+      console.error('Channel error:', err?.message)
+      setConnectionState('error')
+      break
+
+    case 'CLOSED':
+      // Connection closed — may be intentional or network drop
+      setConnectionState('disconnected')
+      break
+  }
+})
+```
+
+---
+
+## Silent Disconnection & Reconnection
+
+Mobile browsers and OS background mode kill WebSocket connections silently.
+Without reconnection handling, real-time stops working and users never notice.
+
+```typescript
+// Robust realtime hook with reconnection
+function useRealtimeChannel(channelName: string, onMessage: (payload: any) => void) {
+  const supabase = createClient()
+
+  useEffect(() => {
+    let channel: ReturnType<typeof supabase.channel>
+    let reconnectTimer: ReturnType<typeof setTimeout>
+    let mounted = true
+
+    const connect = () => {
+      channel = supabase.channel(channelName, { config: { private: true } })
+
+      channel
+        .on('broadcast', { event: 'message' }, onMessage)
+        .subscribe((status) => {
+          if (!mounted) return
+
+          if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR') {
+            // Clean up and retry after 3 seconds
+            supabase.removeChannel(channel)
+            reconnectTimer = setTimeout(connect, 3000)
+          }
+        })
+    }
+
+    connect()
+
+    // Reconnect on browser visibility restore (tab becomes active again)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        supabase.removeChannel(channel)
+        clearTimeout(reconnectTimer)
+        connect()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      mounted = false
+      clearTimeout(reconnectTimer)
+      supabase.removeChannel(channel)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [channelName])
+}
+```
+
+---
+
+## Server-Side Broadcast (HTTP API)
+
+Send to live WebSocket clients FROM a server, API route, or Edge Function.
+No WebSocket connection needed on the server side.
+
+```typescript
+// From a Next.js API route or Edge Function
+// Notify all users in a room when an order status changes
+
+// app/api/orders/[id]/route.ts
+export async function PATCH(request: Request, { params }: { params: { id: string } }) {
+  const supabase = await createClient()  // server client
+  const { status } = await request.json()
+
+  // Update the order
+  const { data: order, error } = await supabase
+    .from('orders')
+    .update({ status })
+    .eq('id', params.id)
+    .select('*, user_id')
+    .single()
+
+  if (error) return Response.json({ error: error.message }, { status: 500 })
+
+  // Notify the user's realtime channel via HTTP (no WebSocket connection needed)
+  const broadcastUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/realtime/v1/api/broadcast`
+
+  await fetch(broadcastUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+      'apikey': process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    },
+    body: JSON.stringify({
+      messages: [
+        {
+          topic: `user:${order.user_id}`,  // channel name the client subscribed to
+          event: 'order_updated',
+          payload: { orderId: order.id, status: order.status },
+        }
+      ]
+    }),
+  })
+
+  return Response.json({ ok: true })
+}
+```
+
+```typescript
+// Client: receive the server-sent broadcast
+const channel = supabase.channel(`user:${user.id}`, { config: { private: true } })
+
+channel
+  .on('broadcast', { event: 'order_updated' }, (payload) => {
+    // Update order status in UI
+    setOrderStatus(payload.payload.status)
+    toast.success(`Order ${payload.payload.status}!`)
+  })
+  .subscribe()
+```
+
+---
+
+## realtime.broadcast_changes — DB Trigger Pattern
+
+Lower overhead than Postgres Changes replication — uses a trigger to broadcast.
+Recommended for high-write tables where Postgres Changes creates WAL pressure.
+
+```sql
+-- Create a trigger that broadcasts changes to a specific channel
+-- Instead of: subscribing to postgres_changes (uses replication slot)
+-- Use: realtime.broadcast_changes() in a trigger (much lighter)
+
+CREATE OR REPLACE FUNCTION broadcast_order_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM realtime.broadcast_changes(
+    'orders:' || NEW.user_id::TEXT,  -- channel topic (matches client subscription)
+    TG_OP,                            -- 'INSERT', 'UPDATE', or 'DELETE'
+    TG_OP,                            -- event name sent to clients
+    TG_TABLE_NAME,                    -- table name
+    TG_TABLE_SCHEMA,                  -- schema name
+    NEW,                              -- new record (null for DELETE)
+    OLD                               -- old record (null for INSERT)
+  );
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER on_order_change
+  AFTER INSERT OR UPDATE OR DELETE ON orders
+  FOR EACH ROW EXECUTE FUNCTION broadcast_order_change();
+```
+
+```typescript
+// Client subscribes to the broadcast channel (not postgres_changes)
+const channel = supabase.channel(`orders:${user.id}`, { config: { private: true } })
+
+channel
+  .on('broadcast', { event: 'UPDATE' }, (payload) => {
+    // payload.payload.record = new record
+    // payload.payload.old_record = old record
+    updateOrder(payload.payload.record)
+  })
+  .on('broadcast', { event: 'INSERT' }, (payload) => {
+    addOrder(payload.payload.record)
+  })
+  .subscribe()
+```
+
+---
+
+## High-Frequency Updates — Throttling Pattern
+
+Cursor tracking, live document editing, and collaborative whiteboards can
+easily exceed 100 events/sec. Always throttle.
+
+```typescript
+// ❌ WRONG — no throttle (cursor position on every mousemove)
+document.addEventListener('mousemove', (e) => {
+  channel.send({ type: 'broadcast', event: 'cursor', payload: { x: e.clientX, y: e.clientY } })
+  // At 60fps this is 60 events/sec per user — hits free tier limit with 2 users
+})
+
+// ✅ CORRECT — throttle with eventsPerSecond param
+const channel = supabase.channel('room:abc', {
+  config: {
+    broadcast: {
+      self: false,        // don't receive your own broadcasts
+      ack: false,         // don't wait for server ack (faster)
+    },
+  },
+})
+
+// Client-side rate limit (10 per second per client)
+let lastSent = 0
+document.addEventListener('mousemove', (e) => {
+  const now = Date.now()
+  if (now - lastSent < 100) return  // max 10/sec
+  lastSent = now
+  channel.send({ type: 'broadcast', event: 'cursor', payload: { x: e.clientX, y: e.clientY } })
+})
+
+// ✅ CORRECT — throttle presence updates (don't update on every keystroke)
+const debouncedTrack = debounce((status: string) => {
+  channel.track({ userId: user.id, status, lastSeen: new Date().toISOString() })
+}, 500)  // max 2 presence updates per second
+```
+
+---
+
+## Broadcast vs Postgres Changes — Architecture Decision
+
+```
+Use BROADCAST when:
+  ✅ High-frequency updates (cursor, typing indicator, game state)
+  ✅ Ephemeral data (doesn't need to persist after session ends)
+  ✅ Client-to-client messaging (one user to others)
+  ✅ Lower DB overhead (no WAL/replication slot)
+  ✅ Custom events with arbitrary payload
+
+Use POSTGRES CHANGES when:
+  ✅ You want DB row data synced to connected clients automatically
+  ✅ Multiple clients need to bootstrap state from DB + get live updates
+  ✅ Data MUST persist regardless of client connection
+  ✅ Offline clients catch up by querying DB on reconnect
+  ❌ NOT for high-frequency updates (each change = DB write + WAL + broadcast)
+  ❌ NOT for cursor/presence (use Broadcast instead)
+  ❌ NOT for tables with >10 writes/sec (use broadcast_changes trigger instead)
+
+Use BROADCAST_CHANGES TRIGGER when:
+  ✅ You have high-write tables that need realtime but Postgres Changes is too heavy
+  ✅ You want DB change broadcast without WAL replication overhead
+  ✅ Best of both: persists in DB + lightweight realtime notification
+```

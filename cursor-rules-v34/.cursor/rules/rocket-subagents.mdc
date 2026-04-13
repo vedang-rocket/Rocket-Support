@@ -1,0 +1,183 @@
+---
+description: >
+  subagents parallel agents terminal agent docs agent test agent refactor agent,
+  run multiple agents at once, decompose task into subagents, spawn specialized agent,
+  agent doing multiple things simultaneously, complex multi-part task automation,
+  long-running agent Cursor 2.4, subagent conflicts file editing same file,
+  orchestrate agents, delegate to subagent, autonomous multi-agent workflow
+globs: []
+alwaysApply: false
+---
+
+# Rocket.new — Subagent Orchestration
+
+> Cursor 2.4 supports spawning specialized subagents for different task types.
+> Used correctly: 85% of complex tasks handled autonomously.
+> Used incorrectly: agents overwrite each other and destroy code.
+
+---
+
+## THE HARD LIMIT: MAX 3 SUBAGENTS AT ONCE
+
+More than 3 subagents causes file conflicts — they edit the same file simultaneously
+and one overwrites the other. This is a confirmed Cursor 2.4 behavior.
+
+**Always: 3 or fewer. Never more.**
+
+---
+
+## THE FOUR SUBAGENT TYPES
+
+| Subagent | What It Does | When to Spawn |
+|---|---|---|
+| **Terminal Subagent** | Runs shell commands, test suites, build checks | Any task requiring command execution |
+| **Docs Subagent** | Reads documentation, scans existing code patterns | Before implementing unfamiliar patterns |
+| **Test Subagent** | Writes and runs tests, verifies behavior | After any implementation change |
+| **Refactor Subagent** | Isolated code changes in a single file | When one file needs changes that don't affect others |
+
+---
+
+## SAFE ORCHESTRATION PATTERNS
+
+### Pattern A — Sequential (safest)
+```
+Main Agent → spawn Docs Subagent (read patterns)
+           → wait for completion
+           → spawn Refactor Subagent (implement)
+           → wait for completion
+           → spawn Test Subagent (verify)
+```
+Never overlap. Each subagent completes before the next starts.
+Use for: any task touching shared files.
+
+### Pattern B — Parallel on isolated files (powerful)
+```
+Main Agent → spawn Refactor Subagent A (edits lib/auth.ts)
+           → spawn Refactor Subagent B (edits app/api/stripe/route.ts)
+           → both run simultaneously — safe because different files
+           → wait for both
+           → spawn Test Subagent (verify both)
+```
+Use for: independent changes to different files.
+**Critical rule**: before spawning parallel agents, confirm the files don't share imports that could conflict.
+
+### Pattern C — Plan-Critique-Execute (highest quality)
+```
+Main Agent (Claude Opus) → creates plan.md
+Gemini Agent (optional) → critiques the plan
+Composer Subagents       → execute each phase
+```
+Use for: large features or architectural changes.
+
+---
+
+## PREVENTING FILE CONFLICTS
+
+Before spawning any parallel subagents, answer these questions:
+
+```
+1. Do both subagents need to edit the same file?
+   YES → run sequentially, not in parallel
+   NO → safe to parallelize
+
+2. Does either subagent's file import from the other's file?
+   YES → run the dependency first, then the dependent
+   NO → safe to parallelize
+
+3. Are both subagents touching the same database schema?
+   YES → run sequentially
+   NO → safe to parallelize
+```
+
+---
+
+## ORCHESTRATION PROMPT TEMPLATES
+
+### Spawn a Terminal Subagent
+```
+Spawn a Terminal Subagent to run the following command and report the output:
+[command]
+Do not proceed with implementation until you have the output.
+```
+
+### Spawn a Docs Subagent
+```
+Before implementing, spawn a Docs Subagent to:
+1. Read @lib/supabase/server.ts and identify the exact createClient pattern used
+2. Read @app/api/ and identify the standard route handler structure
+3. Report what patterns to follow before any code is written
+```
+
+### Spawn a Test Subagent
+```
+After completing the implementation, spawn a Test Subagent to:
+1. Run: npx tsc --noEmit
+2. Run: npm test (if tests exist)
+3. Report: pass/fail count, any new TypeScript errors
+Do not mark this task complete until the Test Subagent reports clean results.
+```
+
+### Spawn parallel Refactor Subagents
+```
+Spawn two Refactor Subagents in parallel:
+- Subagent A: Edit ONLY @lib/supabase/server.ts — [specific change]
+- Subagent B: Edit ONLY @app/api/webhooks/stripe/route.ts — [specific change]
+These files do not share imports. Safe to parallelize.
+Wait for both before continuing.
+```
+
+---
+
+## GIT WORKTREES — THE PROFESSIONAL APPROACH
+
+For large parallel tasks, use Git worktrees instead of multiple Cursor windows.
+Each agent works on its own branch in isolation:
+
+```bash
+# Create isolated worktrees for parallel work
+git worktree add ../project-auth-fix auth-fix-branch
+git worktree add ../project-db-fix db-fix-branch
+
+# Open each in separate Cursor window
+# Each agent works completely isolated
+# Merge when both are done
+```
+
+Benefits over multiple Cursor windows:
+- Complete code isolation — no file conflicts possible
+- Each worktree has its own `node_modules` state
+- Merge via standard git PR process
+- Full history preserved per branch
+
+```bash
+# Clean up worktrees when done
+git worktree remove ../project-auth-fix
+git worktree remove ../project-db-fix
+```
+
+---
+
+## ⚠️ CRITICAL — REPEATED AT BOTTOM
+
+- **Max 3 subagents** — more causes file conflicts that silently destroy code
+- **Parallel only on isolated files** — confirm no shared imports before spawning
+- **Always spawn Test Subagent last** — verify the work before declaring done
+- **Git commit before any multi-agent task** — rollback point is non-negotiable
+- **Sequential by default, parallel only when files are confirmed isolated**
+
+---
+
+## AGENT DEFINITION FILES
+
+Pre-built subagent definitions are in `agents/` at the project root.
+Reference them by name to delegate specialised tasks:
+
+| Agent | File | When to invoke |
+|---|---|---|
+| `code-reviewer` | `agents/code-reviewer.md` | After any change — checks all Rocket patterns |
+| `planner` | `agents/planner.md` | Before any feature — produces plan.md |
+| `database-reviewer` | `agents/database-reviewer.md` | Any data/RLS/schema issue |
+| `security-reviewer` | `agents/security-reviewer.md` | Before production or security sweep |
+| `build-error-resolver` | `agents/build-error-resolver.md` | Netlify build failures |
+
+**How to invoke**: "Use the code-reviewer agent to review the changes I just made."

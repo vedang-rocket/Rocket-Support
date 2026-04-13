@@ -1,0 +1,243 @@
+---
+description: >
+  MCP tools available, use Supabase MCP to check tables, query database live, check RLS policies,
+  verify migrations pushed, check profile trigger, read schema, list tables row counts,
+  use Stripe MCP to check webhooks, read customer subscription status, verify payment,
+  check webhook deliveries, read products prices, memory MCP store facts across sessions,
+  when to call MCP tool vs read file, MCP server connected live database query
+globs: []
+alwaysApply: false
+---
+
+# Rocket.new — MCP Server Usage Protocol
+
+> Three MCP servers are connected. Use them BEFORE guessing from code.
+> Live data beats static analysis every time.
+
+---
+
+## MCP-FIRST DIAGNOSTIC PRINCIPLE (Token Efficiency Rule)
+
+**When troubleshooting ANY problem involving database or external service state:**
+
+1. Use MCP FIRST — query live state
+2. Read files SECOND — only if MCP cannot answer
+
+**Why this matters for tokens:**
+- Reading a 300-line migration file = ~2,000 tokens
+- MCP `execute_sql` for schema = ~150 tokens
+- **That's 13x token savings per query**
+
+**MCP replaces these file reads:**
+| Instead of reading... | Use MCP tool... | Token savings |
+|---|---|---|
+| `supabase/migrations/*.sql` | `list_tables` + `execute_sql` for schema | ~1,500 tokens |
+| `app/api/webhooks/stripe/route.ts` | `webhooks.read` to check endpoint | ~800 tokens |
+| Multiple files to find a table structure | `execute_sql: information_schema.columns` | ~2,000 tokens |
+| Code to guess if migrations ran | `list_tables` for row counts | ~500 tokens |
+
+**Only read files when:**
+- You need to understand implementation logic (not just state)
+- MCP returns insufficient detail
+- The file is directly being edited
+
+---
+
+## THE GOLDEN RULE
+
+**When in doubt about the database state — ASK THE DATABASE.**
+
+Do not read TypeScript files to guess what tables exist.
+Do not assume RLS policies from code.
+Do not assume migrations ran.
+**Call the MCP tool. Get the real answer.**
+
+---
+
+## SERVER 1 — SUPABASE MCP (Most Powerful)
+
+Connected in **read-only mode** — safe to use freely, cannot accidentally destroy data.
+
+### When to call Supabase MCP (call this FIRST for any Supabase issue)
+
+| Symptom | MCP Tool to Call |
+|---|---|
+| Data not loading / empty results | `list_tables` → check table exists + row count |
+| Unknown if migrations ran | `list_tables` → see if tables exist |
+| RLS suspected blocking queries | `execute_sql` → query `pg_policies` |
+| Unknown column names | `execute_sql` → query `information_schema.columns` |
+| Auth issues / blank dashboard | `execute_sql` → check profile trigger exists |
+| Supabase project appears broken | `list_tables` → if fails, project is paused |
+
+### Diagnostic queries to run via `execute_sql`
+
+```sql
+-- 1. Check all tables + rough row count
+SELECT schemaname, tablename 
+FROM pg_tables 
+WHERE schemaname = 'public' 
+ORDER BY tablename;
+
+-- 2. Check RLS on a specific table
+SELECT policyname, cmd, qual, with_check 
+FROM pg_policies 
+WHERE tablename = 'your_table' AND schemaname = 'public';
+
+-- 3. Check profile trigger exists (blank dashboard = this is missing)
+SELECT tgname FROM pg_trigger WHERE tgname = 'on_auth_user_created';
+
+-- 4. Check exact column names (policy must match exactly)
+SELECT column_name, data_type 
+FROM information_schema.columns 
+WHERE table_name = 'your_table' AND table_schema = 'public'
+ORDER BY ordinal_position;
+
+-- 5. Check if user has a profile row
+SELECT id, display_name, created_at 
+FROM profiles 
+WHERE id = '[user-uuid]';
+```
+
+### CRITICAL: Read-only mode limitations
+The Supabase MCP is connected in `--read-only` mode. This means:
+- ✅ Can run SELECT queries, inspect schema, check policies, read logs
+- ❌ Cannot run INSERT, UPDATE, DELETE, CREATE TABLE, ALTER TABLE
+- For fixes that require SQL changes: generate the SQL and tell the developer to run it in Supabase SQL Editor
+
+### Project scoping
+The MCP server connects to whichever project's credentials are in `.env` or `.env.local`.
+When switching projects: update `SUPABASE_SERVICE_ROLE_KEY` and `NEXT_PUBLIC_SUPABASE_URL` in `.env` or `.env.local` — the MCP reconnects automatically on next Cursor restart.
+
+---
+
+## SERVER 2 — STRIPE MCP (Diagnostic Only)
+
+Connected with read-only tools only — cannot charge cards or modify subscriptions.
+
+### When to call Stripe MCP
+
+| Symptom | MCP Tool to Call |
+|---|---|
+| Webhook not receiving events | `webhooks.read` → check endpoint exists + recent deliveries |
+| Payment succeeded but DB not updated | `charges.read` → verify charge + check metadata.user_id |
+| Subscription status wrong | `subscriptions.read` → read actual status |
+| "No such customer" error | `customers.read` → verify customer exists in this mode |
+| "No such price" error | `prices.read` → verify price ID exists in current environment |
+
+### Available tools (read-only subset — stays under 40-tool limit)
+- `customers.read` — look up customer by email or ID
+- `subscriptions.read` / `subscriptions.search` — check subscription status
+- `charges.read` — verify payment and metadata
+- `payment_intents.read` — check payment intent status
+- `webhooks.read` — list endpoints + recent delivery logs
+- `products.read` / `prices.read` — verify product/price exists
+
+### Key Stripe diagnostic: check webhook deliveries
+When a webhook is suspected broken, use `webhooks.read` to see:
+- Does the endpoint exist?
+- What events is it subscribed to?
+- What do the last 10 delivery attempts show?
+This replaces manual checking in the Stripe dashboard entirely.
+
+---
+
+## SERVER 3 — MEMORY MCP (Replaces Manual memory-bank/)
+
+The memory MCP maintains a persistent knowledge graph across ALL sessions automatically.
+It is smarter than the manual `memory-bank/` markdown files — use it as primary, keep `memory-bank/` as backup.
+
+### When to use Memory MCP
+
+| Situation | Action |
+|---|---|
+| Discovered a codebase-specific quirk | `create_entities` + `create_relations` |
+| Fixed a bug | `create_entities` with fix details |
+| Starting a new session | `search_nodes` for project name to retrieve context |
+| Blocked by same issue as last session | `search_nodes` to find previous attempt notes |
+
+### Session start ritual (MANDATORY)
+At the start of every session, run:
+```
+search_nodes: "[project name]"
+```
+This surfaces everything stored about this project from previous sessions.
+
+**If search_nodes returns empty results:**
+This means either:
+- It's the first session on this project (normal — proceed without context)
+- The memory server isn't connected (check Settings → Tools & MCP → memory)
+- The project name search was too specific (try a shorter keyword)
+
+Do NOT assume MCP is broken because search returns empty. Empty result ≠ MCP failure.
+MCP failure = tools don't appear at all in the tools list.
+
+### Session end ritual
+After fixing anything, store it:
+```
+create_entities: [{
+  name: "[project]-[date]-[fix-title]",
+  entityType: "fix",
+  observations: [
+    "Problem: [what was broken]",
+    "Root cause: [why]", 
+    "Fix: [what changed in which files]",
+    "Watch out: [gotcha for next session]"
+  ]
+}]
+```
+
+---
+
+## DECISION TREE: MCP vs File Reading
+
+```
+Question about database schema, tables, or data?
+  → Supabase MCP first (execute_sql / list_tables)
+  → File reading is secondary confirmation only
+
+Question about Stripe payments, webhooks, subscriptions?
+  → Stripe MCP first (webhooks.read / charges.read)
+  → Code reading is secondary
+
+Question about past sessions, what was tried before?
+  → Memory MCP first (search_nodes)
+  → memory-bank/ files as fallback
+
+Question about code logic, component structure, TypeScript?
+  → Read the files — MCP doesn't help here
+  → @file references in prompt
+```
+
+---
+
+## TOOL BUDGET — STAY UNDER 40
+
+Cursor caps total MCP tools at 40 — exceed it and the agent silently loses access to some tools.
+
+Current tool count estimate:
+- Supabase MCP: ~15 tools (read-only mode)
+- Stripe MCP: 8 tools (explicitly limited)
+- Memory MCP: ~5 tools
+- **Total: ~28 tools ✅ safely under limit**
+
+Do NOT add more MCP servers without removing tools from existing ones first.
+
+---
+
+## SAFETY RULES
+
+1. **Never ask MCP to run destructive SQL** — read-only mode prevents it, but never try
+2. **Always confirm before applying schema changes** — generate the SQL, show it, wait for approval
+3. **Stripe MCP reads only** — do not use write tools (not enabled, but confirm before any action)
+4. **Credentials in `.env` or `.env.local` only** — never hardcode in `mcp.json` or any rule file
+5. **Switch projects = update `.env.local`** — then restart Cursor for MCP to reconnect
+
+---
+
+## ⚠️ CRITICAL — REPEATED AT BOTTOM
+
+- **Read database state with MCP before suggesting fixes** — never guess schema from code
+- **Use Stripe MCP to verify webhooks before editing code** — the endpoint might not exist at all
+- **search_nodes at session start** — retrieve memory before asking the developer to repeat context
+- **Stay under 40 total MCP tools** — do not add servers without removing tools
+- **Read-only mode is a safety net, not a limitation** — use it freely

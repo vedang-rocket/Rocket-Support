@@ -1,0 +1,240 @@
+---
+description: >
+  supabase postgres roles anon authenticated service_role, supabase built-in roles permissions,
+  vault secrets supabase store API keys, vault.create_secret vault.read_secret,
+  custom postgres roles RBAC supabase, role based access control supabase,
+  supabase security advisor missing RLS, supabase performance advisor missing indexes,
+  never expose service_role key, supabase database advisors run check,
+  GRANT REVOKE postgres permissions, superuser operations blocked supabase,
+  supabase manage secrets securely, store openai key in vault supabase,
+  supabase role claims JWT custom, postgres role hierarchy supabase
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql", "**/.env*"]
+alwaysApply: false
+---
+
+# Supabase — Security, Roles & Vault Reference
+
+---
+
+## The 6 Built-in Supabase Roles
+
+Every Supabase project has these roles pre-configured. Understanding them prevents both security holes and broken permissions.
+
+| Role | Who uses it | What it can do |
+|---|---|---|
+| `anon` | Unauthenticated API requests | Only what RLS policies explicitly allow |
+| `authenticated` | Logged-in users via supabase-js | Only what RLS policies explicitly allow |
+| `service_role` | Server-side code with service key | Bypasses RLS completely — full database access |
+| `authenticator` | PostgREST internal | Switches to anon/authenticated based on JWT |
+| `supabase_auth_admin` | Auth system | Manages auth.users — never use directly |
+| `postgres` | Superuser (your migrations run as this) | Full database access — migrations, extensions |
+
+### Critical rules
+```
+NEVER use service_role key in browser code
+NEVER prefix service_role key with NEXT_PUBLIC_
+NEVER pass service_role key to client components
+service_role bypasses ALL RLS — it is a master key
+
+Use service_role ONLY in:
+- Server-side API routes (app/api/*)
+- Edge Functions
+- Supabase Admin SDK operations
+- Webhook handlers
+```
+
+```typescript
+// WRONG — never do this
+const supabase = createClient(url, process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY!)
+
+// CORRECT — service role only in server-side code
+// app/api/admin/route.ts
+import { createClient } from '@supabase/supabase-js'
+const adminSupabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!   // No NEXT_PUBLIC_ prefix
+)
+```
+
+---
+
+## Vault — Storing Secrets Securely
+
+Vault is a Supabase extension that stores secrets encrypted in the database. Use it to store API keys that need to be accessed from Edge Functions or database functions — without putting them in environment variables or code.
+
+### Enable Vault
+```
+Supabase Dashboard → Database → Extensions → vault → Enable
+```
+
+### Store a secret
+```sql
+-- Store a secret (run once in SQL Editor)
+SELECT vault.create_secret(
+  'sk-your-openai-api-key',       -- the secret value
+  'openai_api_key',                -- your name for it
+  'OpenAI API key for embeddings'  -- optional description
+);
+-- Returns a UUID — save it, use it to read the secret later
+```
+
+### Read a secret (from database function or Edge Function)
+```sql
+-- In a Postgres function
+CREATE OR REPLACE FUNCTION get_secret(secret_name TEXT)
+RETURNS TEXT LANGUAGE sql SECURITY DEFINER
+SET search_path = public, vault AS $$
+  SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = secret_name;
+$$;
+
+-- Then use in any function
+DECLARE
+  api_key TEXT := get_secret('openai_api_key');
+BEGIN
+  -- use api_key
+END;
+```
+
+```typescript
+// In an Edge Function
+const { data } = await supabase.rpc('get_secret', { secret_name: 'openai_api_key' })
+const apiKey = data  // the actual key value
+```
+
+### List stored secrets (names only — values always encrypted)
+```sql
+SELECT id, name, description, created_at FROM vault.secrets;
+```
+
+### Update or delete a secret
+```sql
+SELECT vault.update_secret('[SECRET_UUID]', 'new-secret-value');
+DELETE FROM vault.secrets WHERE name = 'old_secret_name';
+```
+
+---
+
+## Database Advisors — Run These First
+
+Supabase has two built-in automated advisors that scan your database and flag problems. Always run these on a new project before spending time debugging.
+
+```
+Supabase Dashboard → Advisors
+
+Security Advisor — finds:
+  - Tables with RLS disabled
+  - Functions with SECURITY DEFINER but no search_path set
+  - Roles with excessive privileges
+  - Publicly accessible tables without policies
+
+Performance Advisor — finds:
+  - Foreign key columns without an index (common cause of slow queries)
+  - Duplicate indexes
+  - Tables that could benefit from BRIN indexes (time-series)
+  - Unused indexes (wasting write performance)
+```
+
+**Every Rocket project: run both advisors before first deploy. Fix everything flagged in Security Advisor. Fix the high-impact items from Performance Advisor.**
+
+---
+
+## Custom Postgres Roles (RBAC)
+
+For projects where users have different roles (admin, moderator, member), use custom Postgres roles controlled via JWT claims.
+
+### Step 1 — Create a roles table
+```sql
+CREATE TYPE app_role AS ENUM ('admin', 'moderator', 'member');
+
+CREATE TABLE user_roles (
+  id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  role    app_role NOT NULL DEFAULT 'member',
+  UNIQUE(user_id)
+);
+
+ALTER TABLE user_roles ENABLE ROW LEVEL SECURITY;
+-- Only admins can modify roles — regular users can read their own
+CREATE POLICY "users_read_own_role" ON user_roles FOR SELECT USING (auth.uid() = user_id);
+```
+
+### Step 2 — Auth hook adds role to JWT
+```sql
+-- Custom Access Token hook (see rocket-supabase-auth-advanced.mdc)
+CREATE OR REPLACE FUNCTION public.custom_access_token_hook(event JSONB)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public AS $$
+DECLARE
+  claims JSONB;
+  user_role app_role;
+BEGIN
+  SELECT role INTO user_role FROM public.user_roles WHERE user_id = (event->>'user_id')::UUID;
+  claims := event->'claims';
+  claims := jsonb_set(claims, '{user_role}', to_jsonb(COALESCE(user_role::TEXT, 'member')));
+  RETURN jsonb_set(event, '{claims}', claims);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.custom_access_token_hook TO supabase_auth_admin;
+REVOKE EXECUTE ON FUNCTION public.custom_access_token_hook FROM authenticated, anon, public;
+```
+
+```
+Connect hook: Authentication → Hooks → Custom Access Token → public.custom_access_token_hook
+```
+
+### Step 3 — Helper function to read role from JWT in RLS
+```sql
+CREATE OR REPLACE FUNCTION auth.user_role()
+RETURNS TEXT LANGUAGE sql STABLE AS $$
+  SELECT COALESCE(auth.jwt() ->> 'user_role', 'member');
+$$;
+```
+
+### Step 4 — RLS policies that use the role
+```sql
+-- Admins can see all records; members see only their own
+CREATE POLICY "role_based_access" ON orders FOR SELECT
+USING (
+  auth.user_role() = 'admin'
+  OR auth.uid() = user_id
+);
+
+-- Only admins can delete
+CREATE POLICY "admin_only_delete" ON orders FOR DELETE
+USING (auth.user_role() = 'admin');
+```
+
+### Step 5 — Read role in Next.js
+```typescript
+// Server Component or API route
+const { data: { user } } = await supabase.auth.getUser()
+const userRole = user?.app_metadata?.user_role as 'admin' | 'moderator' | 'member'
+// Note: app_metadata is in the JWT — read it from getUser() server-side
+// Do NOT use user.user_metadata — that is user-writable
+```
+
+---
+
+## Superuser — What Is and Isn't Allowed on Supabase
+
+Supabase runs managed PostgreSQL. The `postgres` role is not a true superuser.
+
+### Blocked operations (Supabase restrictions)
+```sql
+-- These will error on Supabase:
+COPY table FROM PROGRAM 'command';     -- shell execution blocked
+ALTER USER postgres PASSWORD 'new';    -- user management restricted
+CREATE USER new_postgres_user;         -- requires superuser
+```
+
+### What postgres CAN do on Supabase
+```sql
+-- All of these work:
+CREATE EXTENSION IF NOT EXISTS vector;   -- install extensions
+ALTER TABLE ... ;                         -- schema changes
+CREATE OR REPLACE FUNCTION ... ;          -- functions
+CREATE TRIGGER ... ;                      -- triggers
+GRANT/REVOKE on tables and functions;    -- permissions
+ALTER ROLE authenticated SET ... ;        -- role settings
+```

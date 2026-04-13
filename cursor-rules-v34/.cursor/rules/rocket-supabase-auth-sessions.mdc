@@ -1,0 +1,385 @@
+---
+description: >
+  supabase session not working user logged out, supabase access token refresh token,
+  supabase PKCE flow callback route exchangeCodeForSession, supabase why user gets logged out,
+  supabase onAuthStateChange SIGNED_IN TOKEN_REFRESHED, session lifecycle timeout inactivity,
+  supabase sign out all devices global local scope, supabase JWT expiry vs session expiry,
+  supabase ISR session leak cache user data, supabase middleware what it does updateSession,
+  cannot revoke JWT access token supabase, getClaims vs getUser supabase performance,
+  supabase SSR session cookie nextjs, supabase token refresh how it works,
+  supabase session single device force re-login, Vercel module scope session leak supabase
+globs: ["**/*.ts", "**/*.tsx", "**/middleware.ts"]
+alwaysApply: false
+---
+
+# Supabase Auth — Sessions, Tokens & SSR Reference
+
+> This file explains HOW Supabase auth actually works under the hood.
+> Understanding this prevents the most common auth bugs in Rocket projects.
+
+---
+
+## JWT Signing Algorithm — New Default Since May 2025
+
+```
+Projects created after May 1, 2025: default is RS256 (asymmetric — public/private key pair)
+Projects created before May 2025: default is HS256 (symmetric — shared secret)
+
+Check your project: Dashboard → Auth → JWT → Signing Algorithm
+
+Impact on your code:
+  supabase-js: no change — works the same
+  Third-party JWT verification: HS256 uses your JWT secret; RS256 uses a public key URL
+  OAuth 2.1 server: requires RS256 — new projects already have this
+
+Third-party JWT verification with RS256:
+  const JWKS_URL = 'https://[REF].supabase.co/auth/v1/jwks'
+  // Fetch public key from JWKS_URL — do NOT hardcode the key
+  // Use a library like jose: const { createRemoteJWKSet } = require('jose')
+```
+
+---
+
+## How Tokens Work — Access Token vs Refresh Token
+
+```
+User signs in
+    ↓
+Supabase issues TWO tokens:
+
+1. ACCESS TOKEN (JWT)
+   - Short-lived (1 hour default, configurable)
+   - Contains user id, email, role, custom claims
+   - Sent with every API request as Bearer token
+   - CANNOT be revoked before expiry (this is a hard limit of JWT design)
+   - Validated locally (no network call needed)
+
+2. REFRESH TOKEN
+   - Long-lived (never expires by default unless session controls set)
+   - Single-use — exchanged for a new access token when access token expires
+   - Stored in httpOnly cookie by @supabase/ssr
+   - CAN be revoked (signOut() invalidates it)
+   - Requires a network call to exchange
+```
+
+### Why you cannot instantly lock out a user
+
+```typescript
+// You ban a user in the database
+await adminSupabase.auth.admin.updateUserById(userId, { banned: true })
+
+// Problem: their ACCESS TOKEN is still valid for up to 1 hour
+// They can still make API requests until the token expires
+
+// Fix: set a short JWT expiry for security-critical apps
+// Dashboard → Auth → JWT expiry → set to 300 (5 minutes)
+// Trade-off: more frequent refresh token exchanges (performance cost)
+
+// Immediate lockout: set expiry to 300s AND ban at the RLS level:
+CREATE POLICY "block_banned" ON sensitive_table FOR ALL
+USING (
+  NOT EXISTS (
+    SELECT 1 FROM public.banned_users WHERE user_id = auth.uid()
+  )
+);
+// RLS is checked on every query — instant effect
+```
+
+---
+
+## JWT Expiry vs Session Expiry — The Biggest Misconception
+
+```
+Dashboard → Auth → JWT expiry limit
+
+This is NOT "how long until the user is logged out"
+This is "how long the access token is valid before a silent refresh"
+
+Sessions persist indefinitely via refresh tokens (unless you configure session controls)
+
+Example:
+  JWT expiry = 3600 (1 hour)
+  User logs in Monday → access token expires Monday+1hr
+  Supabase silently exchanges refresh token → new access token
+  User is STILL logged in Tuesday, Wednesday, forever
+  Until: they sign out, or their refresh token is revoked
+```
+
+---
+
+## PKCE Flow — Why OAuth Requires a Callback Route
+
+`@supabase/ssr` uses PKCE (Proof Key for Code Exchange) by default — the secure OAuth standard. After the OAuth redirect, you MUST complete the exchange in a callback route.
+
+```typescript
+// app/auth/callback/route.ts — REQUIRED for all OAuth and magic links
+import { createClient } from '@/lib/supabase/server'
+import { NextRequest, NextResponse } from 'next/server'
+
+export async function GET(request: NextRequest) {
+  const { searchParams, origin } = new URL(request.url)
+  const code = searchParams.get('code')
+  const next = searchParams.get('next') ?? '/'
+
+  if (code) {
+    const supabase = await createClient()
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    if (!error) {
+      return NextResponse.redirect(`${origin}${next}`)
+    }
+  }
+
+  // Auth failed — redirect to error page
+  return NextResponse.redirect(`${origin}/auth/auth-code-error`)
+}
+```
+
+```
+This route must be registered as a redirect URL in:
+Supabase Dashboard → Auth → URL Configuration → Redirect URLs
+Add: https://yourdomain.com/auth/callback
+Add: http://localhost:3000/auth/callback
+```
+
+```typescript
+// OAuth sign-in — points to the callback route
+const { error } = await supabase.auth.signInWithOAuth({
+  provider: 'google',
+  options: {
+    redirectTo: `${window.location.origin}/auth/callback`,
+  },
+})
+```
+
+---
+
+## getClaims() vs getUser() — Performance vs Security
+
+```typescript
+// getUser() — validates JWT with Supabase server (network call ~50-200ms)
+// Use for: any operation that reads or writes sensitive data
+const { data: { user } } = await supabase.auth.getUser()
+
+// getClaims() — validates JWT signature locally (microseconds, no network)
+// Use for: middleware checks, role-based routing, non-sensitive reads
+const { data: claims } = await supabase.auth.getClaims()
+// claims = { sub: 'user-uuid', email: '...', user_role: 'admin', aal: 'aal1' }
+```
+
+```typescript
+// middleware.ts — USE getClaims() here (runs on every request)
+export async function middleware(request: NextRequest) {
+  const supabase = createServerClient(/* ... */)
+
+  // getClaims() is microseconds — safe to call on every request
+  const { data: claims } = await supabase.auth.getClaims()
+
+  // Protect /admin route — check role from JWT claims locally
+  if (request.nextUrl.pathname.startsWith('/admin')) {
+    if (!claims || claims.user_role !== 'admin') {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
+
+  return response
+}
+
+// app/api/payments/route.ts — USE getUser() for sensitive operations
+export async function POST(request: NextRequest) {
+  const supabase = await createClient()
+  // getUser() validates with server — catches revoked tokens
+  const { data: { user }, error } = await supabase.auth.getUser()
+  if (error || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  // Now safe to process payment
+}
+```
+
+---
+
+## onAuthStateChange — Listen to Auth Events
+
+```typescript
+// components/AuthProvider.tsx — wrap your app with this
+'use client'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import type { User } from '@supabase/supabase-js'
+
+const AuthContext = createContext<{ user: User | null }>({ user: null })
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null)
+  const supabase = createClient()
+
+  useEffect(() => {
+    // Get initial session
+    supabase.auth.getUser().then(({ data: { user } }) => setUser(user))
+
+    // Listen to auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (event, session) => {
+        setUser(session?.user ?? null)
+
+        switch (event) {
+          case 'SIGNED_IN':
+            // User signed in — redirect or update UI
+            break
+          case 'SIGNED_OUT':
+            // User signed out — clear local state
+            break
+          case 'TOKEN_REFRESHED':
+            // Access token silently refreshed — no action needed
+            break
+          case 'USER_UPDATED':
+            // User updated email/password — re-fetch user data
+            break
+          case 'PASSWORD_RECOVERY':
+            // User clicked password reset link — show reset form
+            break
+        }
+      }
+    )
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  return <AuthContext.Provider value={{ user }}>{children}</AuthContext.Provider>
+}
+
+export const useUser = () => useContext(AuthContext)
+```
+
+---
+
+## Sign-Out Scopes — Controlling Which Devices Are Signed Out
+
+```typescript
+// Sign out this device only (default)
+await supabase.auth.signOut({ scope: 'local' })
+
+// Sign out ALL devices (account compromise response)
+await supabase.auth.signOut({ scope: 'global' })
+
+// Sign out all OTHER devices (keep current session)
+await supabase.auth.signOut({ scope: 'others' })
+```
+
+```typescript
+// "Sign out all devices" button in settings
+export async function POST() {
+  const supabase = await createClient()
+  await supabase.auth.signOut({ scope: 'global' })
+  return NextResponse.redirect('/login')
+}
+```
+
+---
+
+## Session Lifecycle Controls (Pro plan)
+
+```
+Dashboard → Auth → Sessions
+
+Settings:
+  Time-box sessions: ON/OFF
+    → Forces re-login after X days regardless of activity
+    → Default: OFF (sessions never expire)
+
+  Inactivity timeout: X hours
+    → Signs out user if no activity for X hours
+    → Default: OFF
+
+  Single session per user: ON/OFF
+    → Signing in on device 2 revokes device 1
+    → Default: OFF (multiple concurrent sessions allowed)
+```
+
+---
+
+## ISR / Cache Session Leak — CRITICAL SECURITY WARNING
+
+```
+Supabase official warning (2025):
+If a Next.js route is cached (ISR, static generation, or route-level caching)
+AND that route triggers a session refresh via middleware,
+the Set-Cookie header containing the session tokens can be cached
+and served to a different user.
+
+Result: User A's authenticated session is served to User B.
+This is a data breach.
+```
+
+```typescript
+// DANGEROUS — do not cache authenticated routes
+export const revalidate = 60  // ← NEVER use on authenticated routes
+
+// DANGEROUS — do not use fetch with cache on auth-dependent routes
+const data = await fetch(url, { next: { revalidate: 60 } })  // ← DANGEROUS if authed
+
+// SAFE — force dynamic rendering for all authenticated pages
+export const dynamic = 'force-dynamic'
+// Add this to every layout.tsx and page.tsx inside /(protected)
+
+// SAFE — or set in next.config.ts for entire app:
+// experimental: { staleTimes: { dynamic: 0 } }
+```
+
+```typescript
+// Also: Vercel fluid compute module-scope leak
+// Do NOT store user data in module-level variables
+let cachedUser: User | null = null  // ← DANGEROUS in serverless/edge
+
+// SAFE — always get user from request context
+export async function GET() {
+  const supabase = await createClient()  // fresh client per request
+  const { data: { user } } = await supabase.auth.getUser()  // per-request
+}
+```
+
+---
+
+## What Middleware Does (and why it must exist)
+
+```typescript
+// middleware.ts — this is NOT just an auth guard
+// Its primary job is to REFRESH the session on every request
+// Without it: access tokens expire and users get random 401 errors
+
+import { createServerClient } from '@supabase/ssr'
+import { NextResponse, type NextRequest } from 'next/server'
+
+export async function middleware(request: NextRequest) {
+  let supabaseResponse = NextResponse.next({ request })
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() { return request.cookies.getAll() },
+        setAll(cookiesToSet) {
+          // CRITICAL: set cookies on BOTH request and response
+          // If you only set on response, SSR components won't see the refreshed token
+          cookiesToSet.forEach(({ name, value, options }) =>
+            request.cookies.set(name, value)
+          )
+          supabaseResponse = NextResponse.next({ request })
+          cookiesToSet.forEach(({ name, value, options }) =>
+            supabaseResponse.cookies.set(name, value, options)
+          )
+        },
+      },
+    }
+  )
+
+  // THIS is the session refresh — do not skip it
+  // Do not use getClaims() here — getUser() triggers the refresh
+  await supabase.auth.getUser()
+
+  return supabaseResponse
+}
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|ico|css|js)$).*)'],
+}
+```

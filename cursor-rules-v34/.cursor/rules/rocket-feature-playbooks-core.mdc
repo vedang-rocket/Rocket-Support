@@ -1,0 +1,327 @@
+---
+description: >
+  add new authenticated page, add new Supabase table with API route, create new table migration,
+  add Stripe product pricing tier, add email sending Resend, role based access control RBAC,
+  admin role restricted page, how to add a page that requires login, create dashboard page,
+  add settings page, new feature implementation playbook, step by step guide new feature,
+  playbook authenticated route, playbook supabase table CRUD, playbook stripe product
+globs: []
+alwaysApply: false
+---
+
+# Rocket.new — Feature Implementation Playbooks
+
+> Complete, runnable code for the 10 most-requested features.
+> Each playbook: files to create → files to modify → exact code → common mistakes → verification.
+
+---
+
+## Playbook 1: Add a New Authenticated Page
+
+**Files to create**: `app/(protected)/[page-name]/page.tsx`, optionally `loading.tsx`
+**Files to modify**: `components/layout/sidebar.tsx` or `navbar.tsx` (add nav link)
+
+```typescript
+// app/(protected)/analytics/page.tsx
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+
+export default async function AnalyticsPage() {
+  const supabase = await createClient()
+  
+  // Always getUser(), never getSession() — validates JWT server-side
+  const { data: { user }, error } = await supabase.auth.getUser()
+  if (error || !user) redirect('/login')
+
+  // Fetch page-specific data in parallel
+  const [{ data: stats }, { data: events }] = await Promise.all([
+    supabase.from('stats').select('*').eq('user_id', user.id).single(),
+    supabase.from('events').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(10),
+  ])
+
+  return (
+    <div className="container mx-auto p-6">
+      <h1 className="text-2xl font-bold mb-6">Analytics</h1>
+      {/* Your page content */}
+    </div>
+  )
+}
+
+// app/(protected)/analytics/loading.tsx
+export default function Loading() {
+  return (
+    <div className="container mx-auto p-6">
+      <div className="animate-pulse space-y-4">
+        <div className="h-8 bg-gray-200 dark:bg-gray-700 rounded w-1/4" />
+        <div className="h-32 bg-gray-200 dark:bg-gray-700 rounded" />
+      </div>
+    </div>
+  )
+}
+```
+
+**Common mistakes**: Fetching data in `useEffect` instead of Server Component. Not adding the route to navigation.
+**Verify**: Navigate to `/analytics` — redirects to `/login` if not authenticated. Shows content if authenticated.
+
+---
+
+## Playbook 2: Add a New Supabase Table + API Route
+
+**Step 1 — SQL migration** (add to `supabase/migrations/[timestamp]_add_[table].sql`)
+```sql
+-- Create table
+CREATE TABLE IF NOT EXISTS projects (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  status TEXT DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for performance
+CREATE INDEX IF NOT EXISTS projects_user_id_idx ON projects(user_id);
+
+-- RLS
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "select_own" ON projects FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "insert_own" ON projects FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "update_own" ON projects FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "delete_own" ON projects FOR DELETE USING (auth.uid() = user_id);
+```
+
+**Step 2 — TypeScript type** (add to `lib/types.ts` or inline)
+```typescript
+export type Project = {
+  id: string
+  user_id: string
+  name: string
+  description: string | null
+  status: 'active' | 'archived'
+  created_at: string
+  updated_at: string
+}
+```
+
+**Step 3 — API Route**
+```typescript
+// app/api/projects/route.ts
+import { NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+import type { Project } from '@/lib/types'
+
+export async function GET() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { data, error } = await supabase
+    .from('projects')
+    .select<'*', Project>('*')
+    .order('created_at', { ascending: false })
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  return NextResponse.json(data)
+}
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const body = await request.json()
+  const { data, error } = await supabase
+    .from('projects')
+    .insert({ ...body, user_id: user.id })
+    .select<'*', Project>()
+    .single()
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  return NextResponse.json(data, { status: 201 })
+}
+```
+
+**Common mistakes**: Forgetting to run the SQL migration. Missing the index (causes slow queries at scale). Forgetting `ON DELETE CASCADE` on foreign keys.
+
+---
+
+## Playbook 3: Add a New Stripe Product/Pricing Tier
+
+**Files to modify**: `app/api/stripe/checkout/route.ts`, `app/api/webhooks/stripe/route.ts`, `supabase/migrations/`
+
+**Step 1 — Add subscription table** (if not exists)
+```sql
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE UNIQUE,
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  stripe_price_id TEXT,
+  status TEXT DEFAULT 'free',  -- 'free' | 'pro' | 'business' | 'cancelled'
+  current_period_end TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "select_own" ON subscriptions FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "insert_own" ON subscriptions FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "update_own" ON subscriptions FOR UPDATE USING (auth.uid() = user_id);
+```
+
+**Step 2 — Checkout route**
+```typescript
+// app/api/stripe/checkout/route.ts
+import { NextResponse } from 'next/server'
+import Stripe from 'stripe'
+import { createClient } from '@/lib/supabase/server'
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { priceId } = await request.json()
+
+  const session = await stripe.checkout.sessions.create({
+    customer_email: user.email,
+    payment_method_types: ['card'],
+    mode: 'subscription',
+    line_items: [{ price: priceId, quantity: 1 }],
+    success_url: `${process.env.NEXT_PUBLIC_SITE_URL}/dashboard?success=true`,
+    cancel_url: `${process.env.NEXT_PUBLIC_SITE_URL}/pricing`,
+    metadata: { user_id: user.id },
+  })
+
+  return NextResponse.json({ url: session.url })
+}
+```
+
+**Step 3 — Webhook handler** (MUST use `request.text()`)
+```typescript
+// app/api/webhooks/stripe/route.ts
+import { NextResponse } from 'next/server'
+import Stripe from 'stripe'
+import { createClient } from '@/lib/supabase/server'
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
+
+export async function POST(request: Request) {
+  const body = await request.text()       // ← raw text, CRITICAL
+  const sig = request.headers.get('stripe-signature')!
+
+  let event: Stripe.Event
+  try {
+    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
+  } catch {
+    return NextResponse.json({ error: 'Invalid signature' }, { status: 400 })
+  }
+
+  const supabase = await createClient()
+
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object as Stripe.CheckoutSession
+      await supabase.from('subscriptions').upsert({
+        user_id: session.metadata?.user_id,
+        stripe_customer_id: session.customer as string,
+        stripe_subscription_id: session.subscription as string,
+        stripe_price_id: session.metadata?.priceId,
+        status: 'pro',
+      })
+      break
+    }
+    case 'customer.subscription.deleted': {
+      const sub = event.data.object as Stripe.Subscription
+      await supabase.from('subscriptions')
+        .update({ status: 'cancelled' })
+        .eq('stripe_subscription_id', sub.id)
+      break
+    }
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object as Stripe.Invoice
+      await supabase.from('subscriptions')
+        .update({ status: 'past_due' })
+        .eq('stripe_customer_id', invoice.customer as string)
+      break
+    }
+  }
+
+  return NextResponse.json({ received: true })
+}
+```
+
+**Common mistakes**: `request.json()` instead of `request.text()`. Test products not recreated in live mode. Webhook secret not updated for live mode endpoint.
+
+---
+
+## Playbook 4: Email with Resend
+
+```typescript
+// lib/email.ts
+import { Resend } from 'resend'
+
+const resend = new Resend(process.env.RESEND_API_KEY)
+
+export async function sendWelcomeEmail(email: string, name: string) {
+  return resend.emails.send({
+    from: 'hello@yourdomain.com',   // must be verified domain — NOT gmail.com
+    to: email,
+    subject: 'Welcome!',
+    html: `<h1>Welcome, ${name}!</h1><p>Your account is ready.</p>`,
+  })
+}
+
+// Call from Server Action or Route Handler after signup:
+// import { sendWelcomeEmail } from '@/lib/email'
+// await sendWelcomeEmail(user.email!, profile.display_name)
+```
+
+**Common mistake**: Using `@gmail.com` as the from address. Only verified domains work in production.
+
+---
+
+## Playbook 5: Role-Based Access Control (RBAC)
+
+**Step 1 — Add role to profiles table**
+```sql
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user' 
+  CHECK (role IN ('user', 'admin', 'moderator'));
+
+-- Admin can read all profiles
+CREATE POLICY "admin_read_all" ON profiles FOR SELECT
+  USING (
+    auth.uid() = id OR
+    EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin')
+  );
+```
+
+**Step 2 — Server-side role check**
+```typescript
+// lib/auth.ts
+import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+
+export async function requireRole(role: 'admin' | 'moderator') {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) redirect('/login')
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (profile?.role !== role) redirect('/dashboard?error=unauthorized')
+  return { user, profile }
+}
+
+// Usage in admin page:
+// const { user } = await requireRole('admin')
+```
+
+---
+

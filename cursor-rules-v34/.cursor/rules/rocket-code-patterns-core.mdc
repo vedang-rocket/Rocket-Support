@@ -1,0 +1,396 @@
+---
+description: >
+  what does the supabase client file look like, how to write middleware updateSession,
+  auth callback route exact code, protected page getUser pattern, Server Action signup login
+  signout, createBrowserClient createServerClient implementation, profile trigger SQL,
+  RLS policy SQL template, real-time subscription useEffect pattern, file structure layout,
+  Next.js route handler GET POST pattern, supabase ssr exact implementation, lib supabase server ts,
+  where does middleware go, what does app auth callback look like, protected route layout pattern
+globs: ["**/*.ts", "**/*.tsx"]
+alwaysApply: false
+---
+
+
+> These are the EXACT patterns Rocket generates. Use these when reading, debugging, or extending a Rocket project in Cursor. Never guess — Rocket is consistent with these conventions.
+
+---
+
+## File Discipline Rules (Affects Cursor's Understanding)
+
+### Keep files under 500 lines
+Cursor's agent reads files completely up to ~500 lines. Beyond that, understanding degrades.
+- If a file you need to edit exceeds 500 lines: extract logic into smaller modules first
+- Then edit the smaller, focused file
+
+### Document purpose in the first 100 lines
+Cursor indexes and prioritizes the first 100 lines of every file. Put the most important context there:
+```typescript
+/**
+ * @file lib/supabase/server.ts
+ * @purpose Server-side Supabase client for Next.js App Router.
+ * Use this in: Server Components, Route Handlers, Server Actions.
+ * DO NOT use in 'use client' components — use lib/supabase/client.ts instead.
+ * Uses @supabase/ssr createServerClient with Next.js cookie handling.
+ */
+```
+
+This is not just for humans — it directly improves Cursor's ability to reason about which file to use and how to use it correctly.
+
+---
+
+## File Structure — Next.js (TypeScript) — Most Common
+
+```
+/
+├── app/
+│   ├── layout.tsx                    # Root layout — wraps everything
+│   ├── page.tsx                      # Landing page (/)
+│   ├── globals.css                   # Global styles + Tailwind imports
+│   ├── (auth)/                       # Auth route group (no layout)
+│   │   ├── login/page.tsx
+│   │   ├── signup/page.tsx
+│   │   └── reset-password/page.tsx
+│   ├── (protected)/                  # Protected route group
+│   │   ├── layout.tsx                # Auth check layout
+│   │   ├── dashboard/page.tsx
+│   │   ├── settings/page.tsx
+│   │   └── profile/page.tsx
+│   └── auth/
+│       └── callback/route.ts         # Supabase OAuth callback handler
+├── components/
+│   ├── ui/                           # shadcn/ui or Rocket base components
+│   │   ├── button.tsx
+│   │   ├── input.tsx
+│   │   └── card.tsx
+│   ├── layout/
+│   │   ├── navbar.tsx
+│   │   ├── sidebar.tsx
+│   │   └── footer.tsx
+│   └── [feature]/                    # Feature-specific components
+├── lib/
+│   └── supabase/
+│       ├── client.ts                 # Browser (client-side) Supabase client
+│       ├── server.ts                 # Server-side Supabase client
+│       └── middleware.ts             # updateSession() for middleware
+├── middleware.ts                     # Root Next.js middleware (calls updateSession)
+├── .env.local                        # Local env vars (never committed)
+├── next.config.ts                    # Next.js config
+├── tailwind.config.ts                # Tailwind config
+└── package.json
+```
+
+## File Structure — React (JavaScript) — Simpler Apps
+
+```
+/
+├── src/
+│   ├── App.jsx                       # Root + React Router routes
+│   ├── main.jsx                      # Entry point (ReactDOM.createRoot)
+│   ├── pages/
+│   │   ├── Home.jsx
+│   │   ├── Dashboard.jsx
+│   │   ├── Login.jsx
+│   │   └── Signup.jsx
+│   ├── components/
+│   │   ├── Navbar.jsx
+│   │   └── [Feature]/
+│   └── lib/
+│       └── supabase.js               # Single supabase client (browser only)
+├── public/
+├── .env.local
+├── vite.config.js                    # Vite config (NOT webpack)
+└── package.json
+```
+
+---
+
+## Supabase Client Files — Exact Rocket Pattern
+
+### `lib/supabase/client.ts` (Browser / Client Components)
+```typescript
+import { createBrowserClient } from '@supabase/ssr'
+
+export function createClient() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
+```
+
+### `lib/supabase/server.ts` (Server Components, Route Handlers, Server Actions)
+```typescript
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
+
+export async function createClient() {
+  const cookieStore = await cookies()
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll()
+        },
+        setAll(cookiesToSet) {
+          try {
+            cookiesToSet.forEach(({ name, value, options }) =>
+              cookieStore.set(name, value, options)
+            )
+          } catch {
+            // Server Component — cookies set in middleware instead
+          }
+        },
+      },
+    }
+  )
+}
+```
+
+### `lib/supabase/middleware.ts` (Session Refresh)
+```typescript
+import { createServerClient } from '@supabase/ssr'
+import { NextResponse, type NextRequest } from 'next/server'
+
+export async function updateSession(request: NextRequest) {
+  let supabaseResponse = NextResponse.next({ request })
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll()
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value }) =>
+            request.cookies.set(name, value)
+          )
+          supabaseResponse = NextResponse.next({ request })
+          cookiesToSet.forEach(({ name, value, options }) =>
+            supabaseResponse.cookies.set(name, value, options)
+          )
+        },
+      },
+    }
+  )
+
+  // IMPORTANT: use getUser() not getSession() in middleware
+  const { data: { user } } = await supabase.auth.getUser()
+
+  // Redirect unauthenticated users away from protected routes
+  if (
+    !user &&
+    !request.nextUrl.pathname.startsWith('/login') &&
+    !request.nextUrl.pathname.startsWith('/signup') &&
+    !request.nextUrl.pathname.startsWith('/auth')
+  ) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/login'
+    return NextResponse.redirect(url)
+  }
+
+  return supabaseResponse
+}
+```
+
+### `middleware.ts` (Root — calls updateSession)
+```typescript
+import { type NextRequest } from 'next/server'
+import { updateSession } from '@/lib/supabase/middleware'
+
+export async function middleware(request: NextRequest) {
+  return await updateSession(request)
+}
+
+export const config = {
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+  ],
+}
+```
+
+---
+
+## Auth Patterns
+
+### `app/auth/callback/route.ts` — OAuth + Magic Link Callback
+```typescript
+import { NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url)
+  const code = searchParams.get('code')
+  const next = searchParams.get('next') ?? '/dashboard'
+
+  if (code) {
+    const supabase = await createClient()
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    if (!error) {
+      return NextResponse.redirect(`${origin}${next}`)
+    }
+  }
+
+  return NextResponse.redirect(`${origin}/auth/auth-code-error`)
+}
+```
+
+### Protected Page Pattern (Server Component)
+```typescript
+// app/(protected)/dashboard/page.tsx
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+
+export default async function DashboardPage() {
+  const supabase = await createClient()
+  
+  // ALWAYS use getUser() not getSession() — getSession() is not safe in server code
+  const { data: { user }, error } = await supabase.auth.getUser()
+  
+  if (error || !user) {
+    redirect('/login')
+  }
+
+  // Fetch user's data
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', user.id)
+    .single()
+
+  return <div>Welcome {profile?.display_name}</div>
+}
+```
+
+### Login Action (Server Action)
+```typescript
+'use server'
+import { revalidatePath } from 'next/cache'
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+
+export async function login(formData: FormData) {
+  const supabase = await createClient()
+
+  const { error } = await supabase.auth.signInWithPassword({
+    email: formData.get('email') as string,
+    password: formData.get('password') as string,
+  })
+
+  if (error) {
+    redirect('/login?message=Could not authenticate user')
+  }
+
+  revalidatePath('/', 'layout')
+  redirect('/dashboard')
+}
+
+export async function signup(formData: FormData) {
+  const supabase = await createClient()
+
+  const { error } = await supabase.auth.signUp({
+    email: formData.get('email') as string,
+    password: formData.get('password') as string,
+    options: {
+      emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL}/auth/callback`,
+    },
+  })
+
+  if (error) {
+    redirect('/signup?message=Could not create user')
+  }
+
+  redirect('/verify-email')
+}
+
+export async function signOut() {
+  const supabase = await createClient()
+  await supabase.auth.signOut()
+  redirect('/login')
+}
+```
+
+---
+
+## Supabase Database Patterns
+
+### Profile Trigger (Must Exist — Common Missing Piece)
+```sql
+-- Run this in Supabase SQL Editor
+-- Auto-creates profile row when new user signs up
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, display_name, avatar_url, created_at)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email),
+    NEW.raw_user_meta_data->>'avatar_url',
+    NOW()
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+```
+
+### Standard RLS Policies Pattern
+```sql
+-- Enable RLS
+ALTER TABLE your_table ENABLE ROW LEVEL SECURITY;
+
+-- Users can only see their own rows
+CREATE POLICY "Users can view own data" ON your_table
+  FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own data" ON your_table
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own data" ON your_table
+  FOR UPDATE USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own data" ON your_table
+  FOR DELETE USING (auth.uid() = user_id);
+```
+
+### Supabase Query Patterns (TypeScript)
+```typescript
+// Fetch with join
+const { data, error } = await supabase
+  .from('posts')
+  .select(`
+    id, title, created_at,
+    profiles ( display_name, avatar_url )
+  `)
+  .eq('user_id', user.id)
+  .order('created_at', { ascending: false })
+  .limit(10)
+
+// Upsert (insert or update)
+const { data, error } = await supabase
+  .from('profiles')
+  .upsert({ id: user.id, display_name: 'New Name' })
+  .select()
+
+// Real-time subscription (Client Component)
+useEffect(() => {
+  const channel = supabase
+    .channel('table-changes')
+    .on('postgres_changes',
+      { event: '*', schema: 'public', table: 'messages' },
+      (payload) => setMessages(prev => [...prev, payload.new as Message])
+    )
+    .subscribe()
+  return () => { supabase.removeChannel(channel) }
+}, [])
+```
+
+---
+

@@ -1,0 +1,180 @@
+---
+description: >
+  supabase stripe sync engine integration, stripe data as postgres tables,
+  stripe sync engine customers subscriptions invoices postgres, query stripe from SQL supabase,
+  stripe sync one click supabase dashboard, stripe_sync customers table supabase,
+  JOIN orders stripe subscriptions, stripe sync engine vs manual webhook sync,
+  stripe sync engine setup supabase, stripe.customers stripe.subscriptions postgres query,
+  replace stripe webhook manual sync supabase, stripe sync engine January 2026
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase Stripe Sync Engine Reference
+
+**GA: January 2026**
+
+Stripe Sync Engine creates live Postgres replicas of your Stripe data — customers, subscriptions, invoices, products, and payments — queryable as regular SQL tables. Replaces manual webhook sync for read operations.
+
+---
+
+## Setup — One Click
+
+```
+Dashboard → Integrations → Stripe Sync Engine → Enable
+  → Enter Stripe Secret Key
+  → Select which objects to sync (customers, subscriptions, invoices, products, prices)
+  → Supabase creates a private stripe_sync schema
+
+IMPORTANT: stripe_sync schema is PRIVATE — never exposed via PostgREST.
+Access only via server-side code with service_role, or via SQL functions with SECURITY DEFINER.
+```
+
+---
+
+## Available Tables
+
+```sql
+-- After enabling, these tables exist in the stripe_sync schema:
+stripe_sync.customers        -- Stripe customer objects
+stripe_sync.subscriptions    -- Subscription objects + status
+stripe_sync.subscription_items  -- Individual subscription line items
+stripe_sync.invoices         -- Invoice objects + payment status
+stripe_sync.invoice_items    -- Line items on invoices
+stripe_sync.prices           -- Price objects
+stripe_sync.products         -- Product objects
+stripe_sync.payment_intents  -- Payment intent objects
+stripe_sync.payment_methods  -- Payment method objects
+stripe_sync.charges          -- Charge objects
+
+-- Check sync status
+SELECT table_name, last_sync_at FROM stripe_sync.sync_status;
+```
+
+---
+
+## Key Columns Reference
+
+```sql
+-- stripe_sync.subscriptions key columns:
+-- id              TEXT  — Stripe subscription ID (sub_...)
+-- customer_id     TEXT  — Stripe customer ID (cus_...)
+-- status          TEXT  — active | trialing | past_due | canceled | incomplete | unpaid
+-- current_period_start  TIMESTAMPTZ
+-- current_period_end    TIMESTAMPTZ
+-- cancel_at_period_end  BOOLEAN
+-- metadata        JSONB  — your custom metadata including user_id
+-- attrs           JSONB  — full raw Stripe object
+
+-- stripe_sync.customers key columns:
+-- id              TEXT  — Stripe customer ID (cus_...)
+-- email           TEXT
+-- metadata        JSONB  — your custom metadata including user_id
+```
+
+---
+
+## Joining Stripe Data With Your Tables
+
+```sql
+-- Your profiles table must store stripe_customer_id for the join to work
+-- Add if not already present:
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
+CREATE INDEX IF NOT EXISTS profiles_stripe_cid ON profiles(stripe_customer_id);
+
+-- Users with active subscriptions
+SELECT
+  p.id,
+  p.email,
+  s.status AS subscription_status,
+  s.current_period_end,
+  s.cancel_at_period_end
+FROM public.profiles p
+JOIN stripe_sync.customers c ON c.id = p.stripe_customer_id
+JOIN stripe_sync.subscriptions s ON s.customer_id = c.id
+WHERE s.status = 'active';
+
+-- Revenue by plan (last 30 days)
+SELECT
+  pr.name AS plan_name,
+  COUNT(s.id) AS active_subscriptions,
+  SUM(p.unit_amount / 100.0) AS mrr_usd
+FROM stripe_sync.subscriptions s
+JOIN stripe_sync.subscription_items si ON si.subscription_id = s.id
+JOIN stripe_sync.prices p ON p.id = si.price_id
+JOIN stripe_sync.products pr ON pr.id = p.product_id
+WHERE s.status = 'active'
+GROUP BY pr.name;
+
+-- Users with past_due or unpaid subscriptions (need dunning)
+SELECT
+  prof.email,
+  s.status,
+  s.current_period_end AS due_date
+FROM stripe_sync.subscriptions s
+JOIN stripe_sync.customers c ON c.id = s.customer_id
+JOIN public.profiles prof ON prof.stripe_customer_id = c.id
+WHERE s.status IN ('past_due', 'unpaid')
+ORDER BY s.current_period_end;
+```
+
+---
+
+## Access From Server-Side Next.js
+
+```typescript
+// lib/supabase/admin.ts — use admin client for stripe_sync schema
+import { createAdminClient } from '@/lib/supabase/admin'
+
+export async function getUserSubscriptionStatus(stripeCustomerId: string) {
+  const supabase = createAdminClient()
+
+  const { data, error } = await supabase
+    .schema('stripe_sync')
+    .from('subscriptions')
+    .select('status, current_period_end, cancel_at_period_end')
+    .eq('customer_id', stripeCustomerId)
+    .eq('status', 'active')
+    .maybeSingle()
+
+  return { subscription: data, error }
+}
+
+// OR via a SECURITY DEFINER SQL function (cleaner for RLS-scoped access)
+```
+
+```sql
+-- Create a function users can call via supabase.rpc() to get their own subscription
+CREATE OR REPLACE FUNCTION get_my_subscription()
+RETURNS TABLE(status TEXT, current_period_end TIMESTAMPTZ, cancel_at_period_end BOOLEAN)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, stripe_sync AS $$
+  SELECT s.status, s.current_period_end, s.cancel_at_period_end
+  FROM stripe_sync.subscriptions s
+  JOIN stripe_sync.customers c ON c.id = s.customer_id
+  JOIN public.profiles p ON p.stripe_customer_id = c.id
+  WHERE p.id = auth.uid()
+    AND s.status IN ('active', 'trialing', 'past_due')
+  LIMIT 1;
+$$;
+```
+
+```typescript
+// Client call
+const { data } = await supabase.rpc('get_my_subscription')
+```
+
+---
+
+## Stripe Sync Engine vs Manual Webhooks
+
+| | Stripe Sync Engine | Manual Webhooks |
+|---|---|---|
+| Setup | One click | Write webhook handler + RLS + tables |
+| Read operations | Use SQL directly | Query your own synced tables |
+| Write operations | Still use Stripe API | Use Stripe API |
+| Data freshness | Near real-time (~seconds) | Immediate (webhook fires on event) |
+| Historical data | Backfills all history | Only what you received |
+| Use for | Analytics, dashboards, admin queries | Fulfillment, email triggers, status updates |
+
+**Recommendation:** Use Sync Engine for read/query operations. Keep webhooks for write-triggered side effects (send confirmation email when subscription created, update app access when subscription cancels).
