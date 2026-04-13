@@ -1,0 +1,471 @@
+---
+description: >
+  supabase tables views create table, supabase-js joins nested select foreign key,
+  working with arrays postgres text[] integer[], JSONB json unstructured data -> ->> operator,
+  cascade delete ON DELETE CASCADE user deleted orphaned data, postgres enums CREATE TYPE,
+  database triggers BEFORE AFTER INSERT UPDATE DELETE, updated_at trigger auto timestamp,
+  database functions SECURITY DEFINER INVOKER, supabase-js rpc call postgres function,
+  soft delete deleted_at pattern, many-to-many junction table supabase,
+  materialized view security_invoker, upsert onConflict supabase-js,
+  supabase select embedded joins !inner filter, audit log trigger
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase — Database Patterns Reference
+
+---
+
+## supabase-js Response Structure
+
+Every supabase-js query returns the same structure. Know it to write correct error handling.
+
+```typescript
+const {
+  data,       // query result — NULL when error occurs (not [] — NULL)
+  error,      // null on success | { message, code, details, hint }
+  count,      // row count — only populated with { count: 'exact' | 'planned' | 'estimated' }
+  status,     // HTTP status code (200, 201, 204, 400, 401, 403, etc.)
+  statusText  // HTTP status text ('OK', 'Not Found', etc.)
+} = await supabase.from('orders').select('*', { count: 'exact' })
+
+// error.code = PGRST error code (see rocket-supabase-api-keys.mdc)
+// error.message = human readable message
+// error.details = extra context (e.g., which constraint was violated)
+// error.hint = suggested fix from PostgREST
+```
+
+### Always check error BEFORE accessing data
+
+```typescript
+// ❌ WRONG — crashes when data is null (on any error)
+const orders = data.filter(o => o.status === 'pending')
+
+// ❌ WRONG — hides errors silently
+const orders = data || []
+
+// ✅ CORRECT — explicit error check, then safe access
+if (error) {
+  console.error(`[${error.code}] ${error.message}`)
+  return null
+}
+const orders = data ?? []  // data is guaranteed non-null after error check
+```
+
+### Getting row count
+```typescript
+// count is undefined unless you request it
+const { data, count } = await supabase
+  .from('orders')
+  .select('*', { count: 'exact' })    // exact: full COUNT(*) — slower
+  // count: 'planned'   — fast estimate from query planner
+  // count: 'estimated' — fastest, least accurate
+
+// Get count only (no row data) — fastest for pagination UI
+const { count } = await supabase
+  .from('orders')
+  .select('*', { count: 'exact', head: true })  // head: true = no body returned
+```
+
+---
+
+## Tables & Views
+
+### Create table — correct pattern for Rocket projects
+```sql
+CREATE TABLE orders (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  status      order_status DEFAULT 'pending',   -- enum (see below)
+  amount      INTEGER NOT NULL,                  -- always store money in cents
+  metadata    JSONB DEFAULT '{}',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at  TIMESTAMPTZ                        -- soft delete (NULL = not deleted)
+);
+
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE INDEX orders_user_id_idx ON orders(user_id);       -- index every FK
+CREATE INDEX orders_status_idx ON orders(status);         -- index every filtered column
+CREATE INDEX orders_created_at_idx ON orders(created_at); -- index sort columns
+```
+
+### Views — always set security_invoker = true
+```sql
+-- security_invoker = true means RLS from underlying table applies through the view
+-- security_invoker = false (default!) means view owner's permissions used — bypasses RLS
+CREATE VIEW active_orders
+WITH (security_invoker = true) AS
+SELECT * FROM orders WHERE deleted_at IS NULL;
+```
+
+### Materialized views (for expensive aggregations)
+```sql
+CREATE MATERIALIZED VIEW monthly_revenue AS
+SELECT
+  DATE_TRUNC('month', created_at) AS month,
+  SUM(amount) AS total_cents
+FROM orders
+WHERE status = 'completed'
+GROUP BY 1;
+
+-- Refresh manually or via pg_cron
+REFRESH MATERIALIZED VIEW CONCURRENTLY monthly_revenue;
+```
+
+### Soft delete pattern (recommended over hard deletes)
+```typescript
+// Delete = set deleted_at, never actually remove the row
+const { error } = await supabase
+  .from('orders')
+  .update({ deleted_at: new Date().toISOString() })
+  .eq('id', orderId)
+
+// Always filter out soft-deleted rows in queries
+const { data } = await supabase
+  .from('orders')
+  .select()
+  .is('deleted_at', null)   // .is() for NULL comparisons — not .eq()
+```
+
+### Upsert
+```typescript
+// Insert if not exists, update if exists (based on unique constraint)
+const { data, error } = await supabase
+  .from('profiles')
+  .upsert({ id: user.id, username: 'alice' }, { onConflict: 'id' })
+  .select()
+  .single()
+```
+
+---
+
+## Joins — Embedded Foreign Key Selects
+
+The most powerful and most misunderstood feature in supabase-js.
+
+### One-to-many (user → orders)
+```typescript
+// Get user's orders with profile data
+const { data } = await supabase
+  .from('orders')
+  .select(`
+    id,
+    amount,
+    status,
+    profiles (
+      id,
+      full_name,
+      avatar_url
+    )
+  `)
+  .eq('user_id', userId)
+
+// data[0].profiles.full_name  ← direct access
+```
+
+### !inner — filter parent by child column
+```typescript
+// Only return orders that HAVE a matching payment record
+// Without !inner: orders without payments are returned with payments = null
+// With !inner: orders without payments are excluded entirely
+const { data } = await supabase
+  .from('orders')
+  .select('*, payments!inner(id, status)')
+  .eq('payments.status', 'succeeded')
+```
+
+### Many-to-many (posts ↔ tags via junction table)
+```sql
+-- Junction table
+CREATE TABLE post_tags (
+  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,
+  tag_id  UUID REFERENCES tags(id)  ON DELETE CASCADE,
+  PRIMARY KEY (post_id, tag_id)
+);
+```
+```typescript
+// Query — supabase handles the junction automatically
+const { data } = await supabase
+  .from('posts')
+  .select('id, title, tags(id, name)')
+
+// data[0].tags = [{ id: '...', name: 'nextjs' }, ...]
+```
+
+### Nested selects with filters
+```typescript
+const { data } = await supabase
+  .from('profiles')
+  .select(`
+    id,
+    full_name,
+    orders (
+      id,
+      amount,
+      status
+    )
+  `)
+  .eq('orders.status', 'pending')   // filter on nested table
+  .order('created_at', { foreignTable: 'orders', ascending: false })
+```
+
+---
+
+## Cascade Deletes
+
+### ON DELETE CASCADE — child rows auto-deleted when parent deleted
+```sql
+-- When an auth.users row is deleted → profile row deleted too
+CREATE TABLE profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  ...
+);
+
+-- When a user is deleted → all their orders deleted too
+CREATE TABLE orders (
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  ...
+);
+```
+
+### ON DELETE SET NULL — child kept, FK set to NULL
+```sql
+-- When category deleted → products remain, category_id becomes NULL
+CREATE TABLE products (
+  category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
+  ...
+);
+```
+
+### ON DELETE RESTRICT — prevent deletion if children exist
+```sql
+-- Cannot delete a company while it has employees
+CREATE TABLE employees (
+  company_id UUID REFERENCES companies(id) ON DELETE RESTRICT,
+  ...
+);
+```
+
+### Check for cascade issues
+```sql
+-- Find all tables that cascade from auth.users
+SELECT
+  tc.table_name,
+  kcu.column_name,
+  rc.delete_rule
+FROM information_schema.referential_constraints rc
+JOIN information_schema.table_constraints tc ON tc.constraint_name = rc.constraint_name
+JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = rc.constraint_name
+WHERE rc.unique_constraint_name IN (
+  SELECT constraint_name FROM information_schema.table_constraints
+  WHERE table_name = 'users' AND table_schema = 'auth'
+);
+```
+
+---
+
+## Enums
+
+```sql
+-- Create enum type
+CREATE TYPE order_status AS ENUM ('pending', 'processing', 'completed', 'cancelled', 'refunded');
+
+-- Use in table
+CREATE TABLE orders (
+  status order_status DEFAULT 'pending'
+);
+
+-- Add a new value to existing enum (append only — cannot remove/reorder)
+ALTER TYPE order_status ADD VALUE 'on_hold' AFTER 'processing';
+
+-- List all enum values
+SELECT unnest(enum_range(NULL::order_status));
+```
+
+```typescript
+// TypeScript — define matching type (or use generated types from supabase gen types)
+type OrderStatus = 'pending' | 'processing' | 'completed' | 'cancelled' | 'refunded'
+
+// Query with enum filter
+const { data } = await supabase
+  .from('orders')
+  .select()
+  .in('status', ['pending', 'processing'])
+```
+
+---
+
+## Arrays
+
+```sql
+-- Array columns
+CREATE TABLE products (
+  tags        TEXT[],
+  sizes       TEXT[] DEFAULT ARRAY['S', 'M', 'L'],
+  rating_ids  INTEGER[]
+);
+
+-- Array operators
+SELECT * FROM products WHERE 'nextjs' = ANY(tags);        -- contains value
+SELECT * FROM products WHERE tags @> ARRAY['nextjs'];     -- contains all
+SELECT * FROM products WHERE tags && ARRAY['react','vue'];-- overlaps (any match)
+
+-- Append to array
+UPDATE products SET tags = array_append(tags, 'new-tag') WHERE id = $1;
+```
+
+```typescript
+// supabase-js array queries
+const { data } = await supabase
+  .from('products')
+  .select()
+  .contains('tags', ['nextjs'])          // tags contains 'nextjs'
+  .overlaps('sizes', ['M', 'L'])         // sizes has M or L
+```
+
+---
+
+## JSONB — Unstructured Data
+
+```sql
+-- Always use JSONB not JSON (JSONB is indexed, stored binary, faster)
+CREATE TABLE events (
+  metadata JSONB DEFAULT '{}'
+);
+
+-- Operators
+-- -> returns JSONB   ->> returns TEXT
+SELECT metadata -> 'address' -> 'city'    FROM events;  -- nested JSONB
+SELECT metadata ->> 'email'               FROM events;  -- as text (for WHERE)
+SELECT metadata #>> '{address,city}'      FROM events;  -- path as text
+
+-- Query by nested field
+SELECT * FROM events WHERE metadata ->> 'email' = 'user@example.com';
+SELECT * FROM events WHERE (metadata -> 'price')::INTEGER > 100;
+
+-- GIN index for fast JSONB queries
+CREATE INDEX events_metadata_idx ON events USING gin(metadata);
+-- Or index a specific path:
+CREATE INDEX events_email_idx ON events ((metadata ->> 'email'));
+```
+
+```typescript
+// Query JSONB from supabase-js
+const { data } = await supabase
+  .from('events')
+  .select()
+  .eq('metadata->>email', 'user@example.com')     // ->> operator in filter
+  .filter('metadata->>price', 'gt', '100')         // cast to text for comparison
+```
+
+---
+
+## Database Triggers
+
+### auto updated_at (most common trigger in Rocket projects)
+```sql
+-- 1. Create the function once (reuse across all tables)
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$;
+
+-- 2. Attach to every table that needs it
+CREATE TRIGGER set_updated_at
+  BEFORE UPDATE ON orders
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Repeat for other tables:
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON profiles FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON products FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+```
+
+### Audit log trigger
+```sql
+CREATE TABLE audit_log (
+  id         BIGINT GENERATED ALWAYS AS IDENTITY,
+  table_name TEXT,
+  operation  TEXT,
+  old_data   JSONB,
+  new_data   JSONB,
+  changed_by UUID,
+  changed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE OR REPLACE FUNCTION audit_trigger()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  INSERT INTO audit_log(table_name, operation, old_data, new_data, changed_by)
+  VALUES (TG_TABLE_NAME, TG_OP,
+    CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD) ELSE NULL END,
+    CASE WHEN TG_OP != 'DELETE' THEN row_to_json(NEW) ELSE NULL END,
+    auth.uid()
+  );
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER audit_orders
+  AFTER INSERT OR UPDATE OR DELETE ON orders
+  FOR EACH ROW EXECUTE FUNCTION audit_trigger();
+```
+
+### Trigger to queue embedding on insert
+```sql
+CREATE OR REPLACE FUNCTION queue_for_embedding()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM pgmq.send('embed_queue', jsonb_build_object('id', NEW.id, 'content', NEW.content));
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER on_document_insert
+  AFTER INSERT ON documents
+  FOR EACH ROW EXECUTE FUNCTION queue_for_embedding();
+```
+
+---
+
+## Database Functions
+
+```sql
+-- SECURITY INVOKER (default, recommended) — runs as the calling user, RLS applies
+-- SECURITY DEFINER — runs as function owner (postgres), bypasses RLS — use carefully
+
+-- Standard function — called via supabase.rpc()
+CREATE OR REPLACE FUNCTION get_user_stats(p_user_id UUID)
+RETURNS TABLE(total_orders INT, total_spent BIGINT)
+LANGUAGE sql STABLE SECURITY INVOKER AS $$
+  SELECT
+    COUNT(*)::INT,
+    COALESCE(SUM(amount), 0)
+  FROM orders
+  WHERE user_id = p_user_id AND status = 'completed' AND deleted_at IS NULL;
+$$;
+```
+
+```typescript
+// Call from Next.js
+const { data, error } = await supabase.rpc('get_user_stats', { p_user_id: userId })
+// data = { total_orders: 5, total_spent: 45000 }
+```
+
+```sql
+-- SECURITY DEFINER function (use only when you NEED to bypass RLS)
+-- ALWAYS set search_path to prevent search_path injection attacks
+CREATE OR REPLACE FUNCTION admin_get_all_users()
+RETURNS TABLE(id UUID, email TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, auth AS $$
+  SELECT id, email FROM auth.users;
+$$;
+
+-- Grant only to service_role or specific role
+REVOKE EXECUTE ON FUNCTION admin_get_all_users() FROM PUBLIC, authenticated, anon;
+GRANT EXECUTE ON FUNCTION admin_get_all_users() TO service_role;
+```

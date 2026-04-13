@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+
+RKT_HOME="${RKT_HOME:-$HOME/rocket-support}"
+CLAUDE_MD="$RKT_HOME/CLAUDE.md"
+LOG_DIR="$RKT_HOME/logs"
+ENGINE_DIR="$RKT_HOME/engine"
+ENGINE_VENV="$ENGINE_DIR/.venv/bin/python3"
+ENGINE_SCRIPT="$ENGINE_DIR/rkt_smart.py"
+
+# ── Rocket config — edit these if they change ──────────
+ROCKET_BASE="git@github-rocket:vedang-rocket"
+ROCKET_REPOS_DIR="$HOME/Documents/Rocket"
+# ───────────────────────────────────────────────────────
+
+GREEN='\033[0;32m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RED='\033[0;31m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}OK${NC} $1" >&2; }
+info() { echo -e "${BLUE}>>${NC} $1" >&2; }
+fail() { echo -e "${RED}ERR${NC} $1" >&2; exit 1; }
+step() { echo -e "\n${BOLD}${CYAN}-- $1${NC}" >&2; }
+
+# ── resolve input to full git URL + local path ─────────
+resolve() {
+  local input="$1"
+
+  # Already a full git URL
+  if [[ "$input" == git@* || "$input" == http* ]]; then
+    REPO_URL="$input"
+    REPO_NAME=$(basename "$input" .git)
+    REPO_DIR="$ROCKET_REPOS_DIR/$REPO_NAME"
+    return
+  fi
+
+  # Short name — strip .git if present, build full URL
+  REPO_NAME="${input%.git}"
+  REPO_URL="$ROCKET_BASE/${REPO_NAME}.git"
+  REPO_DIR="$ROCKET_REPOS_DIR/$REPO_NAME"
+}
+
+check_deps() {
+  command -v claude >/dev/null 2>&1 || fail "Claude Code not found: npm install -g @anthropic-ai/claude-code"
+  command -v git    >/dev/null 2>&1 || fail "git not found"
+  [[ -f "$CLAUDE_MD" ]] || fail "CLAUDE.md missing at $CLAUDE_MD"
+}
+
+clone_or_use() {
+  mkdir -p "$ROCKET_REPOS_DIR"
+
+  if [[ -d "$REPO_DIR/.git" ]]; then
+    info "$REPO_NAME already cloned — pulling latest..."
+    git -C "$REPO_DIR" pull --quiet 2>/dev/null || info "Pull failed (offline?) — using existing code"
+    ok "Using: $REPO_DIR"
+  else
+    info "Cloning $REPO_NAME → $REPO_DIR"
+    git clone --depth=1 --quiet "$REPO_URL" "$REPO_DIR" 2>/dev/null \
+      || fail "Clone failed. Check repo name and SSH key (github-rocket host)."
+    ok "Cloned: $REPO_DIR"
+  fi
+
+  # Fetch latest remote refs
+  git -C "$REPO_DIR" fetch --all --quiet 2>/dev/null || true
+
+  # Get most recently updated remote branch
+  LATEST_BRANCH=$(git -C "$REPO_DIR" branch -r \
+    --sort=-committerdate \
+    2>/dev/null | grep -v 'HEAD' | head -1 | xargs | sed 's|origin/||')
+
+  # Fallback chain
+  if [[ -z "$LATEST_BRANCH" ]]; then
+    LATEST_BRANCH="main"
+  fi
+
+  # Checkout and pull
+  git -C "$REPO_DIR" checkout "$LATEST_BRANCH" --quiet 2>/dev/null || true
+  git -C "$REPO_DIR" pull --quiet origin "$LATEST_BRANCH" 2>/dev/null || true
+
+  # Show current state
+  CURRENT_BRANCH=$(git -C "$REPO_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+  LAST_COMMIT=$(git -C "$REPO_DIR" log -1 --format="%h %s" 2>/dev/null || echo "no commits")
+  ok "Branch: $CURRENT_BRANCH | $LAST_COMMIT"
+}
+
+build_prompt() {
+  local hint="${1:-}"
+  cat << 'PROMPT'
+You are a Rocket.new support engineer. Diagnose and fix this client project fast.
+
+STEP 1 - Run these bash commands first (before reading any files):
+
+  grep -rn "getSession()" ./app ./lib ./middleware.ts 2>/dev/null | head -5
+  ls middleware.ts 2>/dev/null && echo "middleware: ROOT OK" || echo "middleware: MISSING FROM ROOT"
+  ls app/middleware.ts 2>/dev/null && echo "middleware: WRONG - in /app" || true
+  grep -rn "request.json()" ./app/api/webhooks 2>/dev/null | head -3
+  grep -rn "auth-helpers-nextjs" ./package.json 2>/dev/null
+  grep '"next"' package.json 2>/dev/null | head -1
+  npx tsc --noEmit 2>&1 | head -10
+  for var in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY STRIPE_SECRET_KEY; do
+    grep -q "^${var}=" .env .env.local 2>/dev/null && echo "OK: ${var}" || echo "MISSING: ${var}"
+  done
+
+STEP 2 - Read: middleware.ts, lib/supabase/server.ts, lib/supabase/client.ts, app/auth/callback/route.ts
+
+STEP 3 - One sentence: root cause. Category: AUTH | SUPABASE | STRIPE | BUILD | ENV | OTHER
+
+STEP 4 - Fix (hard rules):
+- getUser() not getSession() in server code
+- request.text() not request.json() in Stripe webhooks
+- middleware.ts at project root, never in /app
+- @supabase/ssr only, never auth-helpers-nextjs
+- await cookies() in Next.js 15
+- Never NEXT_PUBLIC_ on service role key
+- Never "// ... existing code ..." in diffs
+
+STEP 5 - Output:
+ROOT CAUSE: [one sentence]
+CATEGORY: [AUTH|SUPABASE|STRIPE|BUILD|ENV|OTHER]
+FIX: [2-3 sentences]
+FILES CHANGED: [list]
+DIFF:
+```diff
+[complete diff]
+```
+VERIFY: [bash command]
+IF STILL BROKEN: [one fallback]
+PROMPT
+  [[ -n "$hint" ]] && echo "" && echo "CLIENT HINT: $hint"
+}
+
+run_query() {
+  local hint="${1:-}"
+
+  step "Query: $REPO_NAME ($REPO_URL)"
+  [[ -n "$hint" ]] && info "Hint: $hint"
+
+  clone_or_use
+
+  local prompt
+  prompt=$(build_prompt "$hint")
+
+  info "Running diagnosis..."
+  cd "$REPO_DIR"
+
+  # ── Smart engine (semgrep → DB → Claude) ───────────────────────────────
+  if [[ -f "$ENGINE_SCRIPT" && -f "$ENGINE_VENV" ]]; then
+    info "Using rkt engine v2 (semgrep + DB + Claude)"
+    "$ENGINE_VENV" "$ENGINE_SCRIPT" "$REPO_DIR" "${hint:-}"
+  else
+    # Fallback to direct claude call if engine not available
+    info "Engine not found — falling back to direct Claude Code call"
+    local prompt
+    prompt=$(build_prompt "$hint")
+    claude -p "$prompt" \
+      --append-system-prompt "$(cat "$CLAUDE_MD")" \
+      --allowedTools "Read,Bash,Grep,Glob" \
+      --output-format text
+  fi
+
+  mkdir -p "$LOG_DIR"
+  echo "$(date -Iseconds) | $REPO_NAME | ${hint:-no hint}" >> "$LOG_DIR/queries.log"
+
+  ok "Done — repo kept at $REPO_DIR"
+}
+
+run_local() {
+  local path="$1"
+  local hint="${2:-}"
+
+  REPO_DIR="$(cd "$path" 2>/dev/null && pwd)" \
+    || fail "--local path not found: $path"
+  REPO_NAME="$(basename "$REPO_DIR")"
+  REPO_URL="local"
+
+  step "Local: $REPO_NAME ($REPO_DIR)"
+  [[ -n "$hint" ]] && info "Hint: $hint"
+
+  local prompt
+  prompt=$(build_prompt "$hint")
+
+  info "Running diagnosis..."
+  cd "$REPO_DIR"
+
+  if [[ -f "$ENGINE_SCRIPT" && -f "$ENGINE_VENV" ]]; then
+    info "Using rkt engine v2 (semgrep + DB + Claude)"
+    "$ENGINE_VENV" "$ENGINE_SCRIPT" "$REPO_DIR" "${hint:-}"
+  else
+    info "Engine not found — falling back to direct Claude Code call"
+    claude -p "$prompt" \
+      --append-system-prompt "$(cat "$CLAUDE_MD")" \
+      --allowedTools "Read,Bash,Grep,Glob" \
+      --output-format text
+  fi
+
+  mkdir -p "$LOG_DIR"
+  echo "$(date -Iseconds) | $REPO_NAME (local) | ${hint:-no hint}" >> "$LOG_DIR/queries.log"
+
+  ok "Done — $REPO_DIR"
+}
+
+list_repos() {
+  echo -e "${BOLD}Cloned repos in $ROCKET_REPOS_DIR:${NC}" >&2
+  ls "$ROCKET_REPOS_DIR" 2>/dev/null || echo "  (none yet)"
+}
+
+show_log() {
+  [[ -f "$LOG_DIR/queries.log" ]] && tail -20 "$LOG_DIR/queries.log" || echo "No queries yet."
+}
+
+usage() {
+  cat >&2 << EOF
+
+${BOLD}rkt${NC} — Rocket.new support CLI
+
+${BOLD}Usage:${NC}
+  rkt cliently                        Short name — resolves to $ROCKET_BASE/cliently.git
+  rkt cliently "auth broken"          With hint for faster routing
+  rkt git@github-rocket:org/repo.git  Full URL (for non-Rocket repos)
+  rkt --local /path/to/repo           Use already-cloned local path, skip clone step
+  rkt --local /path/to/repo "hint"    Local path with hint
+  rkt --list                          Show all cloned repos
+  rkt --log                           Recent query history
+
+${BOLD}Repos are cloned to:${NC} $ROCKET_REPOS_DIR
+${BOLD}Base URL:${NC} $ROCKET_BASE
+
+EOF
+  exit 0
+}
+
+main() {
+  [[ $# -eq 0 ]] && usage
+
+  case "${1:-}" in
+    --help|-h) usage ;;
+    --list)    list_repos ;;
+    --log)     show_log ;;
+    --local)
+      check_deps
+      [[ -z "${2:-}" ]] && fail "--local requires a path argument"
+      run_local "$2" "${3:-}"
+      ;;
+    *)
+      check_deps
+      resolve "$1"
+      run_query "${2:-}"
+      ;;
+  esac
+}
+
+main "$@"

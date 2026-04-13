@@ -1,0 +1,42 @@
+rules:
+  - id: middleware-in-app-directory
+    patterns:
+      - pattern: export async function middleware($REQUEST) { ... }
+    paths:
+      include:
+        - "app/middleware.ts"
+        - "app/middleware.js"
+        - "src/app/middleware.ts"
+        - "src/app/middleware.js"
+        - "app/**/middleware.ts"
+        - "src/app/**/middleware.ts"
+    message: >
+      ROCKET RULE 3: middleware.ts must be at the PROJECT ROOT (or src/ if using src dir),
+      never inside /app. Next.js only recognises middleware.ts at root or src/ level.
+      Middleware inside /app is silently ignored → auth redirects never fire → OAuth loops.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: AUTH
+      rocket_rule: "3"
+      fix_summary: "Move middleware.ts from /app to project root"
+
+  - id: middleware-export-config-missing
+    patterns:
+      - pattern: export async function middleware($REQUEST) { ... }
+      - pattern-not-inside: |
+          ...
+          export const config = { ... }
+          ...
+    paths:
+      include:
+        - "middleware.ts"
+        - "src/middleware.ts"
+    message: >
+      middleware.ts is missing export const config = { matcher: [...] }.
+      Without a matcher, middleware runs on every request including static files — very slow.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: AUTH
+      rocket_rule: "3"

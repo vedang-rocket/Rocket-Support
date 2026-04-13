@@ -1,0 +1,19 @@
+{
+  "agents": {
+    "agent-1776057521153-p4e8cg": {
+      "agentId": "agent-1776057521153-p4e8cg",
+      "agentType": "general",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "model": "sonnet"
+      },
+      "createdAt": "2026-04-13T05:18:41.153Z",
+      "domain": "rocket-support",
+      "model": "sonnet",
+      "modelRoutedBy": "explicit"
+    }
+  },
+  "version": "3.0.0"
+}

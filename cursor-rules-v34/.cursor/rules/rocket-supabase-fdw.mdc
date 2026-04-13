@@ -1,0 +1,381 @@
+---
+description: >
+  supabase foreign data wrappers FDW, query stripe from postgres supabase,
+  query firebase from supabase postgres, migrate from firebase to supabase FDW,
+  supabase wrappers extension, JOIN supabase table with stripe data SQL,
+  postgres_fdw external postgres server, query S3 from supabase,
+  supabase query external services as tables, airtable FDW supabase,
+  bigquery FDW supabase, connect external database supabase SQL,
+  supabase wrappers vault credentials FDW, foreign table supabase setup,
+  query external API as postgres table supabase
+globs: ["**/*.sql", "**/*.ts"]
+alwaysApply: false
+---
+
+# Supabase — Foreign Data Wrappers (FDW) Reference
+
+Foreign Data Wrappers let you query external services — Stripe, Firebase, S3, BigQuery,
+Airtable, Redis — as if they were regular Postgres tables. One SQL query can JOIN your
+own data with live data from any external source.
+
+---
+
+## Critical Security Rule
+
+> FDW foreign tables MUST always be in a `private` schema — NEVER in `public`.
+> Foreign tables bypass RLS. If you put them in public, anyone with your anon key
+> can SELECT from Stripe, Firebase, or wherever you connected.
+
+```sql
+CREATE SCHEMA IF NOT EXISTS private;
+-- All foreign tables go here — not in public
+```
+
+---
+
+## Enable the Wrappers Extension
+
+```sql
+CREATE EXTENSION IF NOT EXISTS wrappers WITH SCHEMA extensions;
+```
+
+---
+
+## Stripe FDW — Query Stripe Data as SQL Tables
+
+Use case: JOIN your orders table with live Stripe subscription data, audit billing,
+check customer status, build admin dashboards without API calls.
+
+### Setup
+```sql
+-- 1. Store Stripe secret key in Vault (never hardcode)
+SELECT vault.create_secret('sk_live_...', 'stripe_secret_key', 'Stripe live secret key');
+-- Copy the returned UUID
+
+-- 2. Create the Stripe foreign server
+CREATE SERVER stripe_server
+  FOREIGN DATA WRAPPER stripe_wrapper
+  OPTIONS (
+    api_key_id '[VAULT_SECRET_UUID]'  -- UUID from vault.create_secret above
+  );
+
+-- 3. Create a schema for Stripe tables (private — never public)
+CREATE SCHEMA IF NOT EXISTS stripe;
+REVOKE ALL ON SCHEMA stripe FROM PUBLIC, anon, authenticated;
+
+-- 4. Create foreign tables (only create the ones you need)
+CREATE FOREIGN TABLE stripe.customers (
+  id TEXT,
+  email TEXT,
+  name TEXT,
+  created TIMESTAMP,
+  attrs JSONB
+)
+SERVER stripe_server
+OPTIONS (object 'customers', rowid_column 'id');
+
+CREATE FOREIGN TABLE stripe.subscriptions (
+  id TEXT,
+  customer TEXT,
+  status TEXT,
+  current_period_start TIMESTAMP,
+  current_period_end TIMESTAMP,
+  attrs JSONB
+)
+SERVER stripe_server
+OPTIONS (object 'subscriptions', rowid_column 'id');
+
+CREATE FOREIGN TABLE stripe.invoices (
+  id TEXT,
+  customer TEXT,
+  status TEXT,
+  amount_due INTEGER,
+  amount_paid INTEGER,
+  created TIMESTAMP,
+  attrs JSONB
+)
+SERVER stripe_server
+OPTIONS (object 'invoices', rowid_column 'id');
+```
+
+### Query examples
+```sql
+-- JOIN your profiles table with live Stripe subscription status
+SELECT
+  p.id,
+  p.email,
+  s.status AS stripe_status,
+  s.current_period_end AS renews_at
+FROM public.profiles p
+LEFT JOIN stripe.subscriptions s ON s.customer = p.stripe_customer_id
+WHERE s.status = 'active';
+
+-- Find customers whose subscription expired but still have active access in your DB
+SELECT p.email, p.stripe_customer_id, s.status
+FROM public.profiles p
+JOIN stripe.subscriptions s ON s.customer = p.stripe_customer_id
+WHERE s.status = 'canceled'
+  AND p.subscription_active = true;  -- data mismatch — fix these
+
+-- Audit: invoices not linked to any profile
+SELECT i.id, i.customer, i.amount_due
+FROM stripe.invoices i
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.profiles p WHERE p.stripe_customer_id = i.customer
+);
+```
+
+### Access from server-side Next.js (via DB function)
+```sql
+-- Create a function so server-side code can call it via .rpc()
+-- Direct SELECT on stripe.* schema is only available to service_role
+CREATE OR REPLACE FUNCTION get_user_stripe_status(p_user_id UUID)
+RETURNS TABLE(stripe_status TEXT, renews_at TIMESTAMP)
+LANGUAGE sql SECURITY DEFINER
+SET search_path = public, stripe AS $$
+  SELECT s.status, s.current_period_end
+  FROM stripe.subscriptions s
+  JOIN public.profiles p ON p.stripe_customer_id = s.customer
+  WHERE p.id = p_user_id
+  LIMIT 1;
+$$;
+```
+
+```typescript
+// app/api/subscription/route.ts
+const { data } = await supabase.rpc('get_user_stripe_status', { p_user_id: user.id })
+```
+
+---
+
+## Firebase FDW — Migrate FROM Firebase to Supabase
+
+Use case: Read Firestore data directly from Postgres during migration.
+Query both databases simultaneously to validate data parity.
+
+### Setup
+```sql
+-- Store Firebase service account credentials in Vault
+SELECT vault.create_secret(
+  '{"type":"service_account","project_id":"...","private_key":"..."}',
+  'firebase_service_account',
+  'Firebase service account JSON'
+);
+
+CREATE SERVER firebase_server
+  FOREIGN DATA WRAPPER firebase_wrapper
+  OPTIONS (
+    sa_key_id '[VAULT_UUID]',
+    project_id 'your-firebase-project-id'
+  );
+
+CREATE SCHEMA IF NOT EXISTS firebase;
+REVOKE ALL ON SCHEMA firebase FROM PUBLIC, anon, authenticated;
+
+-- Map a Firestore collection to a foreign table
+CREATE FOREIGN TABLE firebase.users (
+  name TEXT,           -- document path
+  attrs JSONB          -- all document fields
+)
+SERVER firebase_server
+OPTIONS (object 'users');   -- Firestore collection name
+```
+
+### Migration validation queries
+```sql
+-- Count comparison: Firebase vs Supabase
+SELECT
+  (SELECT COUNT(*) FROM firebase.users) AS firebase_count,
+  (SELECT COUNT(*) FROM public.profiles) AS supabase_count;
+
+-- Find Firebase users not yet migrated to Supabase
+SELECT fb.attrs->>'email' AS email
+FROM firebase.users fb
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.profiles p
+  WHERE p.email = fb.attrs->>'email'
+);
+```
+
+---
+
+## S3 FDW — Query Files in S3 as Tables
+
+Use case: Import CSV/Parquet files from S3 directly into queries without downloading.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS wrappers WITH SCHEMA extensions;
+
+SELECT vault.create_secret('AKIAIOSFODNN7EXAMPLE', 's3_access_key');
+SELECT vault.create_secret('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 's3_secret_key');
+
+CREATE SERVER s3_server
+  FOREIGN DATA WRAPPER s3_wrapper
+  OPTIONS (
+    aws_access_key_id_id     '[access_key_vault_uuid]',
+    aws_secret_access_key_id '[secret_key_vault_uuid]',
+    aws_region               'us-east-1'
+  );
+
+CREATE SCHEMA IF NOT EXISTS s3_data;
+
+-- Query a CSV file in S3 as a table
+CREATE FOREIGN TABLE s3_data.monthly_exports (
+  user_id    TEXT,
+  event      TEXT,
+  created_at TEXT
+)
+SERVER s3_server
+OPTIONS (
+  uri      's3://your-bucket/exports/2026-03.csv',
+  format   'csv',
+  has_header 'true'
+);
+
+-- Now query it like a regular table
+SELECT event, COUNT(*) FROM s3_data.monthly_exports GROUP BY event;
+```
+
+---
+
+## Available Wrappers Quick Reference
+
+| Wrapper | Use case | Vault needed |
+|---|---|---|
+| `stripe_wrapper` | Stripe customers, subscriptions, invoices | Stripe secret key |
+| `firebase_wrapper` | Firestore documents, Firebase Auth users | Service account JSON |
+| `s3_wrapper` | CSV/Parquet files in AWS S3 or R2 | AWS credentials |
+| `bigquery_wrapper` | BigQuery tables and views | GCP service account |
+| `clickhouse_wrapper` | ClickHouse analytics tables | CH credentials |
+| `airtable_wrapper` | Airtable base tables | Airtable API key |
+| `redis_wrapper` | Redis key-value, sorted sets | Redis URL |
+| `notion_wrapper` | Notion databases | Notion API key |
+| `cognito_wrapper` | AWS Cognito user pools | AWS credentials |
+
+All wrappers: always use Vault for credentials, always use private schema for tables.
+
+---
+
+## Analytics Buckets — Data Lake via Apache Iceberg
+
+**Status**: Public Alpha (2025). Available on Pro plan and above.
+
+Analytics Buckets store data as Apache Iceberg / Parquet on S3.
+Purpose: time-series data, logs, analytics pipelines, historical analysis.
+NOT for serving user files — for data that you query with SQL or analytics tools.
+
+> Note: Supabase ETL replication INTO analytics buckets was removed.
+> You must ingest data yourself (pg_net webhook to ingestion endpoint,
+> Edge Function writing Parquet, or external ETL pipeline).
+
+### Create an Analytics Bucket
+```
+Dashboard → Storage → New Bucket → Analytics Bucket
+  Name: analytics
+  Namespace: your_namespace
+```
+
+### Query from Postgres via Iceberg FDW
+```sql
+-- Enable wrappers
+CREATE EXTENSION IF NOT EXISTS wrappers WITH SCHEMA extensions;
+
+-- Store S3 credentials in Vault
+SELECT vault.create_secret('[ANALYTICS_BUCKET_ACCESS_KEY]', 'analytics_access_key');
+SELECT vault.create_secret('[ANALYTICS_BUCKET_SECRET_KEY]', 'analytics_secret_key');
+
+-- Create the foreign server pointing at your Analytics Bucket
+CREATE SERVER analytics_server
+  FOREIGN DATA WRAPPER iceberg_wrapper
+  OPTIONS (
+    url       '[ANALYTICS_BUCKET_ENDPOINT_URL]',   -- from Dashboard → Storage → Bucket Settings
+    aws_access_key_id_id     '[VAULT_UUID_ACCESS]',
+    aws_secret_access_key_id '[VAULT_UUID_SECRET]',
+    region    'us-east-1'
+  );
+
+CREATE SCHEMA IF NOT EXISTS analytics;
+
+-- Create foreign table (schema must match your Iceberg table)
+CREATE FOREIGN TABLE analytics.events (
+  user_id    TEXT,
+  event_name TEXT,
+  properties JSONB,
+  created_at TIMESTAMPTZ
+)
+SERVER analytics_server
+OPTIONS (table_path 's3://[BUCKET_PATH]/events/');
+
+-- Now query analytics data like regular SQL
+SELECT event_name, COUNT(*) AS count
+FROM analytics.events
+WHERE created_at > NOW() - INTERVAL '30 days'
+GROUP BY event_name
+ORDER BY count DESC;
+
+-- JOIN analytics with your operational data
+SELECT p.email, COUNT(e.event_name) AS events_last_month
+FROM analytics.events e
+JOIN public.profiles p ON p.id::TEXT = e.user_id
+WHERE e.created_at > NOW() - INTERVAL '30 days'
+GROUP BY p.email
+ORDER BY events_last_month DESC;
+```
+
+### Write to Analytics Bucket from Edge Function
+```typescript
+// supabase/functions/log-event/index.ts
+// Writes events to Analytics Bucket in Parquet format via Arrow IPC
+
+Deno.serve(async (req: Request) => {
+  const { userId, eventName, properties } = await req.json()
+
+  // Use your ingestion pipeline (Airbyte, custom ETL, direct S3 write)
+  // Supabase does not currently provide a managed write API for Analytics Buckets
+  // Recommended: write to a Postgres events table first, then batch export to S3
+
+  // Simple pattern: write to postgres events table
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+
+  await supabase.from('events').insert({
+    user_id: userId, event_name: eventName,
+    properties, created_at: new Date().toISOString()
+  })
+
+  return new Response('ok')
+})
+```
+
+### Query from DuckDB (external analytics tool)
+```python
+# Python / data science context
+import duckdb
+
+# DuckDB can query Iceberg tables directly from S3
+conn = duckdb.connect()
+conn.execute("""
+  INSTALL iceberg; LOAD iceberg;
+  SET s3_access_key_id = '[YOUR_KEY]';
+  SET s3_secret_access_key = '[YOUR_SECRET]';
+""")
+
+result = conn.execute("""
+  SELECT event_name, COUNT(*) as count
+  FROM iceberg_scan('s3://[BUCKET]/events/')
+  WHERE created_at > '2026-01-01'
+  GROUP BY event_name
+""").fetchdf()
+```
+
+### Analytics Buckets vs Regular Files Buckets
+
+| | Files Bucket | Analytics Bucket |
+|---|---|---|
+| Use case | User images, PDFs, any file | Time-series data, logs, analytics |
+| Format | Original file format | Apache Iceberg / Parquet (columnar) |
+| Access | REST API, signed URLs | SQL via FDW, DuckDB, Spark, PyIceberg |
+| Query performance | File lookup by path | Columnar scan, partition pruning |
+| Cost model | Per GB stored + egress | Per GB stored (S3 pricing) |

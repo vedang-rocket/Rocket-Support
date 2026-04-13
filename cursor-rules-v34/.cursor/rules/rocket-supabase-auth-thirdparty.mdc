@@ -1,0 +1,198 @@
+---
+description: >
+  supabase Clerk integration deprecated 2025 new pattern, Clerk JWT template deprecated,
+  supabase Firebase Auth third party provider, supabase Auth0 integration,
+  supabase Cognito AWS Amplify auth, supabase WorkOS auth,
+  Clerk supabase native integration accessToken callback, third party auth supabase setup,
+  supabase use external auth provider JWT, Clerk RLS policies supabase auth.uid,
+  migrate Clerk to Supabase auth, Firebase Auth supabase database RLS,
+  third party JWT supabase row level security, supabase third party auth provider
+globs: ["**/*.ts", "**/*.tsx"]
+alwaysApply: false
+---
+
+# Supabase Auth — Third-Party Auth Providers Reference
+
+---
+
+## ⚠️ CLERK DEPRECATION WARNING — April 1, 2025
+
+**The old Clerk + Supabase JWT template method was deprecated April 1, 2025.**
+
+If you see any of these patterns in a Rocket project, they are running deprecated code:
+```typescript
+// OLD — DEPRECATED — do not use
+const supabaseToken = await session.getToken({ template: 'supabase' })
+const supabase = createClient(url, key, {
+  global: { headers: { Authorization: `Bearer ${supabaseToken}` } }
+})
+```
+
+**New native integration (use this instead):**
+
+### Step 1 — Configure in Supabase Dashboard
+```
+Dashboard → Auth → Third-party Auth → Add provider → Clerk
+Enter: Clerk Domain (from Clerk dashboard → Domains → your domain)
+Supabase will auto-generate the required JWT verification configuration
+```
+
+### Step 2 — Update your Supabase client
+```typescript
+// lib/supabase/client.ts — new pattern using accessToken callback
+import { createClient } from '@supabase/supabase-js'
+import { useAuth } from '@clerk/nextjs'
+
+export function createClerkSupabaseClient() {
+  const { getToken } = useAuth()
+
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      accessToken: async () => {
+        // Get Clerk session token — Supabase validates it natively
+        return getToken()
+      },
+    }
+  )
+}
+```
+
+```typescript
+// Server-side (App Router Server Components / API routes)
+import { auth } from '@clerk/nextjs/server'
+import { createClient } from '@supabase/supabase-js'
+
+export async function createClerkSupabaseServerClient() {
+  const { getToken } = await auth()
+
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      accessToken: async () => getToken(),
+    }
+  )
+}
+```
+
+### Step 3 — RLS with Clerk
+
+Clerk users are identified in Supabase via their Clerk user ID, not a UUID:
+```sql
+-- Clerk user IDs look like: user_2abc123def456
+-- They are stored in the JWT sub claim
+
+-- RLS policy using Clerk user ID
+CREATE POLICY "users_own_data" ON orders FOR ALL
+USING (
+  -- auth.jwt()->>'sub' returns the Clerk user ID
+  (auth.jwt()->>'sub') = clerk_user_id  -- your column storing Clerk user ID
+);
+
+-- Helper function for cleaner policies
+CREATE OR REPLACE FUNCTION auth.clerk_uid()
+RETURNS TEXT LANGUAGE sql STABLE AS $$
+  SELECT auth.jwt()->>'sub';
+$$;
+
+-- Then use in policies:
+CREATE POLICY "users_own_data" ON orders FOR ALL
+USING (clerk_user_id = auth.clerk_uid());
+```
+
+### Step 4 — Profile table with Clerk
+```sql
+CREATE TABLE profiles (
+  clerk_user_id TEXT PRIMARY KEY,  -- NOT UUID — Clerk IDs are text
+  email TEXT,
+  full_name TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "users_own_profile" ON profiles FOR ALL
+USING (clerk_user_id = auth.clerk_uid());
+```
+
+---
+
+## Firebase Auth → Supabase Database
+
+Use Firebase Auth for authentication but Supabase for the database.
+Primary use case: migrating from Firebase — keep Auth running while moving data.
+
+### Setup
+```
+Dashboard → Auth → Third-party Auth → Add provider → Firebase
+Enter: Firebase Project ID (from Firebase console → Project settings)
+```
+
+### Client setup
+```typescript
+// lib/supabase/client.ts
+import { createClient } from '@supabase/supabase-js'
+import { getAuth } from 'firebase/auth'
+
+export function createFirebaseSupabaseClient() {
+  const auth = getAuth()
+
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      accessToken: async () => {
+        const user = auth.currentUser
+        if (!user) return null
+        return user.getIdToken()  // Firebase ID token — Supabase validates natively
+      },
+    }
+  )
+}
+```
+
+### RLS with Firebase Auth
+```sql
+-- Firebase UIDs are strings like: "abc123xyz"
+-- Available via auth.jwt()->>'sub'
+
+CREATE POLICY "firebase_users_own_data" ON orders FOR ALL
+USING ((auth.jwt()->>'sub') = firebase_uid);
+
+-- Firebase-specific claims
+CREATE OR REPLACE FUNCTION auth.firebase_uid()
+RETURNS TEXT LANGUAGE sql STABLE AS $$
+  SELECT auth.jwt()->>'sub';
+$$;
+```
+
+---
+
+## Third-Party Auth Providers Quick Reference
+
+| Provider | Use case | Plan required | Key docs |
+|---|---|---|---|
+| Clerk | Modern auth UI, B2B, orgs | Any | Dashboard → Auth → Third-party → Clerk |
+| Firebase Auth | Firebase migration, existing Firebase apps | Any | Dashboard → Auth → Third-party → Firebase |
+| Auth0 | Enterprise, existing Auth0 setups | Any | Dashboard → Auth → Third-party → Auth0 |
+| AWS Cognito | AWS ecosystem, Amplify apps | Any | Dashboard → Auth → Third-party → Cognito |
+| WorkOS | Enterprise SSO, directory sync | Any | Dashboard → Auth → Third-party → WorkOS |
+
+**All third-party providers use the same pattern:**
+1. Configure provider in Dashboard → Auth → Third-party Auth
+2. Pass `accessToken` callback to `createClient()` that returns the provider's token
+3. Use `auth.jwt()->>'sub'` in RLS policies for the user identifier
+
+---
+
+## Choosing: Supabase Auth vs Third-Party Auth
+
+| Scenario | Recommendation |
+|---|---|
+| New Rocket project, no existing auth system | Use Supabase Auth (built-in, no extra cost, no extra service) |
+| Project already using Clerk | Keep Clerk, use new native integration (not deprecated pattern) |
+| Migrating FROM Firebase | Use Firebase Auth FDW + Firebase Auth third-party while migrating |
+| Enterprise B2B needing SSO | Supabase Auth + SAML SSO (Team plan+) or WorkOS integration |
+| Complex org/team structure | Clerk (better org management) + native Supabase integration |

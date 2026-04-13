@@ -1,0 +1,343 @@
+---
+description: >
+  how to write a good prompt for Cursor, agent going off-rails touching wrong files,
+  Cursor changed too many files, how to scope a prompt to one file, fix loop burning tokens,
+  how to prompt for a bug fix, Intent State Constraints framework, plan.md before coding,
+  context getting too long start fresh chat, /summarize pattern long session, schema-first
+  development, refactoring without breaking callers, chain-of-thought debugging prompt,
+  agent made it worse how to recover, prompt template for Rocket Next.js Supabase project
+alwaysApply: false
+---
+
+# Rocket.new — Elite Cursor Prompting Patterns
+
+> These patterns are for YOU to use when prompting Cursor to fix or build in a Rocket project.
+> Based on top 1% Cursor usage research. These produce accurate, scoped, non-destructive output.
+
+---
+
+## The Prompting Hierarchy
+
+Three layers, each more enforceable than the last:
+
+| Layer | What It Is | When to Use |
+|---|---|---|
+| **Rules** (`.cursor/rules/`) | Declarative constraints always in context | Background — always active |
+| **Skills** (`.cursor/skills/`) | Procedural step-by-step guides | Auto-loaded by Cursor for matching tasks |
+| **Commands** (`.cursor/commands/`) | Heavy-weight injectable prompts | Intentionally triggered for high-stakes operations |
+
+**Key insight**: Commands are injected verbatim into the agent context. They carry more enforcement weight than rules because the agent reads them as direct instructions in the current conversation — not as background context. Use commands when precision matters most.
+
+### When to use a command vs a plain prompt
+
+Use a **command** for:
+- Anything touching auth, payments, or RLS (high breakage risk)
+- Features requiring 3+ files
+- Any refactor (scope creep risk)
+- Before accepting a diff (security review)
+- When the task is well-defined and repeatable
+
+Use a **plain prompt** for:
+- Quick one-file fixes with a clear solution
+- Asking questions / exploring options
+- Explaining code or debugging with no changes
+
+---
+
+## Context Management: The /summarize Pattern
+
+For sessions running longer than 15 exchanges, context degrades. Use this pattern:
+
+```
+/summarize
+
+Summarize this conversation in 3-5 bullet points:
+- What was the original problem?
+- What was tried?
+- What worked or didn't work?
+- What is the current state?
+- What still needs to be done?
+
+Output this as a compact context block I can paste into a new chat.
+```
+
+Then start a fresh chat with the summary as the opening context. This:
+- Resets context degradation
+- Removes noise from failed attempts
+- Gives the new session a clean, accurate starting state
+
+---
+
+## The Foundation: Intent + State + Constraints
+
+Every Cursor prompt needs all three layers. Missing one causes hallucinations, scope drift, or wrong fixes.
+
+| Layer | What It Is | Without It |
+|---|---|---|
+| **Intent** | What you want to achieve | Cursor guesses the goal |
+| **State** | Which files are relevant right now | Cursor searches blind, misses context |
+| **Constraints** | What must NOT change | Cursor "improves" unrelated things and breaks them |
+
+**Structure every prompt like this:**
+```
+[CONSTRAINT UPFRONT: what not to touch]
+[Intent: what you want]
+[State: @file1 @file2 — the exact relevant files]
+[Constraint repeated at end: confirm scope]
+```
+
+> Why constraints at top AND bottom? Research shows LLMs give highest attention to the first and last parts of context. The middle gets "lost." Bury your key constraint in the middle and Cursor may ignore it.
+
+---
+
+## Debugging: Reproduce → Isolate → Constrain
+
+```
+Error in [exact file path]:
+[paste EXACT error message — never paraphrase it]
+
+How to reproduce:
+[exact steps]
+
+Relevant files: @[file1] @[file2]
+
+Chain-of-thought task:
+Trace the call chain from [trigger] to the point of failure.
+State what SHOULD happen at each step vs what IS happening.
+Identify the exact step where behavior diverges.
+Do NOT propose a fix until the trace is complete.
+
+Constraint: Do not modify [specific section you're protecting].
+```
+
+### Real Examples
+
+**Auth broken after OAuth:**
+```
+Error in app/(protected)/dashboard/page.tsx:
+AuthSessionMissingError: Auth session missing!
+
+Reproduces when: user logs in with Google OAuth, then navigates directly to /dashboard via URL bar.
+
+Relevant files: @app/(protected)/dashboard/page.tsx @app/auth/callback/route.ts @middleware.ts @lib/supabase/middleware.ts
+
+Chain-of-thought: Trace the full OAuth flow from Google callback through Supabase session
+exchange through middleware to the dashboard page load. At which step is the session lost?
+
+Constraint: Do not touch the data fetching or Stripe logic in dashboard/page.tsx.
+Only fix the auth session issue.
+```
+
+**RLS returning empty:**
+```
+Supabase query in @app/(protected)/projects/page.tsx returns [] despite data existing.
+Verified: the user IS authenticated (user.id logs correctly).
+Verified: rows exist in the 'projects' table in Supabase dashboard.
+
+Chain-of-thought:
+1. Check if RLS is enabled on 'projects' table
+2. Check if policies exist — run: SELECT * FROM pg_policies WHERE tablename = 'projects'
+3. Check if policy uses auth.uid() = user_id (verify column name matches)
+4. Check if the correct Supabase client is used (server.ts for Server Component)
+State which check fails. Then fix only that.
+
+Constraint: Do not change any other queries or page logic.
+```
+
+**When first fix doesn't work:**
+```
+The fix didn't resolve it. Error still: [paste error]
+
+New approach — do not guess:
+Search the entire codebase for every place that calls [function/route/API].
+Trace which specific call is triggering this error.
+Use grep: grep -r "[search term]" ./app ./lib
+State what you find before proposing anything.
+```
+
+---
+
+## Refactoring: Declare Scope Before Touching Anything
+
+The biggest AI refactoring risk: the agent "improves" unrelated things and breaks callers.
+
+```
+Refactor [function/hook/component] in @[exact file].
+
+Goal: [what it should look like after]
+
+Preserve EXACTLY:
+- Function signature: [describe signature]
+- Return type: [describe]
+- Error handling behavior
+
+Do NOT:
+- Modify any file that imports from this path
+- Change the public API
+- Add new functionality
+- Rename exports
+
+Make changes file by file. Show me each diff before moving to the next.
+```
+
+**Real example:**
+```
+Refactor the createClient function in @lib/supabase/server.ts to use 
+the latest @supabase/ssr createServerClient API.
+
+Preserve EXACTLY:
+- Export name: createClient
+- It must remain an async function
+- Cookie handling must still work in Next.js App Router
+
+Do NOT touch:
+- lib/supabase/client.ts (browser client — completely separate)
+- lib/supabase/middleware.ts
+- Any component that imports createClient
+
+Show me ONLY the change to server.ts. I will review before you continue.
+```
+
+---
+
+## Feature Building: Schema → Plan → Implement in Phases
+
+**Rule**: Never ask Cursor to design AND implement simultaneously. Design first (outside Cursor or in a fresh chat), then implement phase by phase.
+
+### Step 1 — Define the data shape first (schema-first)
+```
+Define a TypeScript type for [feature]:
+type [Name] = {
+  id: string          // uuid
+  user_id: string     // references auth.users
+  [field]: [type]
+  created_at: string
+}
+```
+
+### Step 2 — Generate SQL from the type
+```
+Generate the Supabase SQL migration for the [Name] type above.
+Include:
+- CREATE TABLE with proper PostgreSQL types
+- RLS: enable row level security
+- RLS policies for SELECT/INSERT/UPDATE/DELETE where auth.uid() = user_id
+Output SQL only — no code yet.
+```
+
+### Step 3 — Generate query functions
+```
+Generate typed Supabase query functions for CRUD on '[table]' using the [Name] type.
+Put in @lib/supabase/[table].ts
+Include error handling. Use createClient from @lib/supabase/server.ts
+```
+
+### Step 4 — Generate UI from the query functions
+```
+Create a Server Component at @app/[route]/page.tsx.
+Use query functions from @lib/supabase/[table].ts
+Follow the layout pattern from @app/dashboard/page.tsx for consistency.
+Show loading state and empty state.
+```
+
+One type definition drives the entire stack. Cursor always has a concrete contract — dramatically fewer hallucinations.
+
+---
+
+## The plan.md Pattern (For Complex Features)
+
+For any feature touching 3+ files, create a plan first:
+
+```
+// In a fresh chat or Claude.ai — design before you build:
+
+Design a [feature] for a Rocket.new Next.js + Supabase project.
+Stack: Next.js App Router, TypeScript, Supabase (@supabase/ssr), Tailwind, Netlify.
+
+Produce plan.md with:
+1. Database tables and columns needed
+2. RLS policies
+3. New files to create (with full paths)
+4. Implementation phases (Phase 1 = data layer, Phase 2 = UI, Phase 3 = integrations)
+5. What must NOT be changed in existing files
+
+No code yet — only the plan.
+```
+
+Then in Cursor:
+```
+Implement Phase 1 from @plan.md: [phase description]
+Do not implement Phase 2 yet. I will review Phase 1 before we continue.
+```
+
+---
+
+## Context Management
+
+### Start a fresh chat when:
+- Switching from debugging to building a new feature
+- The conversation has 15+ exchanges (context degradation is measurable by this point)
+- Agent went off-rails and you've reverted — don't correct in the same chat, start fresh
+- Moving to a completely different part of the codebase
+
+### Always open a new chat with:
+```
+Rocket.new Next.js TypeScript project.
+Stack: Next.js App Router, Supabase (@supabase/ssr), Stripe, Tailwind, Netlify.
+Task: [exactly what you're doing this session]
+Relevant files: @[file1] @[file2]
+Constraint: [what must not change]
+```
+
+### What NOT to include:
+- Files unrelated to the current task (they dilute attention)
+- The entire codebase when 2-3 files are enough
+- Old conversation history when starting a new task
+
+---
+
+## Diff Review Checklist — Run Before Accepting Any Change
+
+```
+□ Did it modify files I didn't mention?
+□ New dependencies added that aren't in package.json?
+□ Used getSession() instead of getUser() in server code?
+□ Used request.json() in a Stripe webhook? (must be request.text())
+□ Used browser Supabase client (lib/supabase/client.ts) in a Server Component?
+□ Changed a function signature that other files depend on?
+□ Added middleware.ts inside /app instead of project root?
+□ Does the logic match my INTENT, not just my literal words?
+□ Anything "technically correct but wrong for this codebase"?
+```
+
+If any box is checked → reject, refine the prompt, run again.
+
+---
+
+## When the Agent Goes Off-Rails
+
+**WRONG**: Add correction prompts to the broken conversation.  
+**RIGHT**:
+1. `git stash` or rollback in Rocket
+2. Close the conversation entirely
+3. Open a fresh chat
+4. Rewrite the prompt with tighter constraints
+
+More correction prompts in a broken context = more confused output. The model doesn't learn it was wrong — it just has more noise to work with.
+
+---
+
+## Capture Every Mistake as a Rule
+
+When Cursor makes a mistake that reveals a Rocket-specific pattern:
+
+Add to `rocket-cursor-behavior.mdc`:
+```
+### ❌ NEVER [what it did wrong]
+[code example of wrong pattern]
+// ✅ ALWAYS [correct pattern]
+[code example of correct pattern]
+```
+
+This is the compounding flywheel: every mistake today prevents the same mistake in every future session across every project.
+

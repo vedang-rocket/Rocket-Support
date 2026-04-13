@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-open — Clone repo and drop into full Claude Code session
+#  Usage: rkt-open <github-url>
+#  Use this when the issue needs back-and-forth (not just a quick fix)
+# ============================================================
+set -euo pipefail
+
+RKT_HOME="${RKT_HOME:-$HOME/rocket-support}"
+CLAUDE_MD="$RKT_HOME/CLAUDE.md"
+TMP_BASE="/tmp/rkt-repos"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}✓${NC} $1"; }
+info() { echo -e "${BLUE}▸${NC} $1"; }
+fail() { echo -e "${RED}✗${NC} $1"; exit 1; }
+
+[[ $# -eq 0 ]] && { echo "Usage: rkt-open <github-url>"; exit 1; }
+[[ ! -f "$CLAUDE_MD" ]] && fail "Run rkt --setup first"
+
+URL="$1"
+REPO_NAME=$(basename "$URL" .git)
+DEST="$TMP_BASE/${REPO_NAME}-interactive"
+
+info "Cloning $REPO_NAME..."
+rm -rf "$DEST" 2>/dev/null || true
+git clone --depth=1 --quiet "$URL" "$DEST"
+ok "Ready"
+
+# Copy our CLAUDE.md into the repo so Claude picks it up automatically
+cp "$CLAUDE_MD" "$DEST/CLAUDE.md"
+
+echo ""
+echo -e "${BOLD}Opening interactive Claude Code session in $REPO_NAME${NC}"
+echo -e "Type ${BOLD}/audit-codebase${NC} to start, or just describe the issue."
+echo ""
+
+cd "$DEST"
+
+# Start interactive Claude Code with our settings injected
+# The CLAUDE.md we copied will be auto-loaded by Claude Code
+CLAUDE_CONFIG_DIR="$RKT_HOME/.claude" claude
+
+# Cleanup on exit (optional — comment out if you want to keep the repo)
+echo ""
+info "Session ended. Cleaning up $DEST..."
+cd /
+rm -rf "$DEST"
+ok "Done"

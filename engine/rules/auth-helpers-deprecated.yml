@@ -1,0 +1,47 @@
+rules:
+  - id: supabase-auth-helpers-nextjs-deprecated
+    pattern: import $X from '@supabase/auth-helpers-nextjs'
+    fix: import $X from '@supabase/ssr'
+    message: >
+      ROCKET RULE 4: @supabase/auth-helpers-nextjs is deprecated and incompatible with Next.js 15 App Router.
+      Migrate to @supabase/ssr. The API is different — update createClientComponentClient →
+      createBrowserClient, createServerComponentClient → createServerClient.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: SUPABASE
+      rocket_rule: "4"
+      fix_summary: "Replace @supabase/auth-helpers-nextjs import with @supabase/ssr"
+
+  - id: supabase-auth-helpers-nextjs-named-import
+    pattern: import { $X } from '@supabase/auth-helpers-nextjs'
+    fix: import { $X } from '@supabase/ssr'
+    message: >
+      ROCKET RULE 4: @supabase/auth-helpers-nextjs is deprecated. Use @supabase/ssr.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: SUPABASE
+      rocket_rule: "4"
+
+  - id: supabase-create-client-component-deprecated
+    pattern: createClientComponentClient()
+    message: >
+      ROCKET RULE 4: createClientComponentClient is from the deprecated auth-helpers package.
+      Replace with createBrowserClient from @supabase/ssr.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: SUPABASE
+      rocket_rule: "4"
+
+  - id: supabase-create-server-component-deprecated
+    pattern: createServerComponentClient($OPTS)
+    message: >
+      ROCKET RULE 4: createServerComponentClient is from the deprecated auth-helpers package.
+      Replace with createServerClient from @supabase/ssr.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: SUPABASE
+      rocket_rule: "4"

@@ -1,0 +1,7 @@
+engine/.venv/
+engine/__pycache__/
+engine/kb/__pycache__/
+*.pyc
+.DS_Store
+logs/
+cursor-rules-v34/

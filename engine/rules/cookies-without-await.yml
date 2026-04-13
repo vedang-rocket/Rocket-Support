@@ -1,0 +1,42 @@
+rules:
+  - id: cookies-without-await-const
+    pattern: const $STORE = cookies()
+    fix: const $STORE = await cookies()
+    message: >
+      ROCKET RULE 5: cookies() must be awaited in Next.js 15.
+      Next.js 15 made cookies() async. Without await you get a Promise object, not the cookie store,
+      causing silent auth failures or "cookies() should be awaited" errors.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: AUTH
+      rocket_rule: "5"
+      fix_summary: "Add await before cookies() call"
+
+  - id: cookies-without-await-let
+    pattern: let $STORE = cookies()
+    fix: let $STORE = await cookies()
+    message: >
+      ROCKET RULE 5: cookies() must be awaited in Next.js 15.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: AUTH
+      rocket_rule: "5"
+
+  - id: cookies-without-await-createclient
+    patterns:
+      - pattern: |
+          const $CLIENT = createServerClient(
+            $URL,
+            $KEY,
+            { cookies: { getAll: () => cookies().getAll(), ... } }
+          )
+    message: >
+      ROCKET RULE 5: cookies() inside createServerClient options must be called from an awaited store.
+      Assign: const cookieStore = await cookies() first, then reference cookieStore.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: AUTH
+      rocket_rule: "5"

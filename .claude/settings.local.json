@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install:*)",
+      "Read(//Users/sarvadhisolution/Documents/Rocket/wedcraft/**)",
+      "Read(//Users/sarvadhisolution/Documents/Rocket/**)",
+      "Bash(python chain_walker.py ~/Documents/Rocket/wedcraft)",
+      "Bash(python -c ':*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); deps={**d.get\\('dependencies',{}\\),**d.get\\('devDependencies',{}\\)}; print\\('supabase:', any\\('supabase' in k for k in deps\\)\\); print\\('stripe:', any\\('stripe' in k.lower\\(\\) for k in deps\\)\\); print\\('keys:', [k for k in deps if 'supabase' in k or 'stripe' in k.lower\\(\\)][:10]\\)\")",
+      "Bash(python -c \"import rkt_engine\")",
+      "Bash(.venv/bin/pip show:*)",
+      "Bash(mkdir -p ~/rocket-support/engine/kb)",
+      "Bash(mkdir -p ~/rocket-support/kb)",
+      "Bash(chmod +x:*)",
+      "Read(//Users/sarvadhisolution/Documents/**)",
+      "Read(//Users/sarvadhisolution/**)",
+      "Bash(.venv/bin/python -c ':*)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('hooks',{}\\), indent=2\\)\\)\")",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; cat \"{}\" 2>/dev/null' echo \"=== project mcp ===\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('main:', d.get\\('main'\\)\\); print\\('bin:', d.get\\('bin'\\)\\)\")",
+      "Bash(uvx --version)",
+      "Bash(uv --version)",
+      "Bash(CLAUDE_TOOL_NAME=\"Grep\" bash ~/.claude/hooks/graphify.sh)",
+      "Bash(bash ~/.claude/hooks/ux-detector.sh)",
+      "Bash(npx -y ruflo@latest --help)",
+      "Bash(npx ruflo@latest mcp --help)",
+      "mcp__ruflo__agent_spawn",
+      "Bash(sed -n '270,295p' /Users/sarvadhisolution/rocket-support/bin/rkt-main)",
+      "Bash(bash -n /Users/sarvadhisolution/rocket-support/bin/rkt-main)",
+      "Bash(bash -n ~/rocket-support/bin/rkt-main)",
+      "Bash(~/rocket-support/bin/rkt-main ~/Documents/wedcraft --no-diagnose)",
+      "Bash(python3:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "code-review-graph"
+  ]
+}

@@ -1,0 +1,37 @@
+rules:
+  - id: stripe-webhook-request-json
+    pattern: await request.json()
+    fix: await request.text()
+    paths:
+      include:
+        - "**/webhooks/**"
+        - "**/webhook/**"
+        - "**/*webhook*"
+        - "**/*stripe*"
+    message: >
+      ROCKET RULE 2: Use request.text() not request.json() in Stripe webhook handlers.
+      stripe.webhooks.constructEvent() requires the raw body string to verify the signature.
+      Parsing as JSON first destroys the raw bytes needed for HMAC verification → always 400.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: STRIPE
+      rocket_rule: "2"
+      fix_summary: "Replace await request.json() with await request.text() in webhook handlers"
+
+  - id: stripe-webhook-req-json-var
+    pattern: const $BODY = await $REQ.json()
+    fix: const $BODY = await $REQ.text()
+    paths:
+      include:
+        - "**/webhooks/**"
+        - "**/webhook/**"
+        - "**/*webhook*"
+        - "**/*stripe*"
+    message: >
+      ROCKET RULE 2: Webhook body must be raw text. request.json() breaks Stripe signature verification.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: STRIPE
+      rocket_rule: "2"

@@ -1,0 +1,316 @@
+---
+description: >
+  supabase queues pgmq setup enable dashboard, supabase queues pgmq_public schema RPC,
+  supabase.schema pgmq_public send message queue, supabase queue background jobs,
+  pgmq function not found error fix, basic vs unlogged queue supabase,
+  supabase queue RLS authorization client access, pgmq read delete archive message,
+  supabase queue visibility timeout vt, long poll pgmq.read_with_poll,
+  supabase queue consuming messages edge function, durable job queue supabase postgres,
+  pgmq dashboard monitoring supabase, supabase queues guaranteed delivery
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase Queues — Complete Reference
+
+Supabase Queues is a Dashboard Module built on pgmq — durable message queues with guaranteed delivery inside Postgres.
+
+---
+
+## Step 1 — Enable Queues (REQUIRED — easy to miss)
+
+```
+Supabase Dashboard → Integrations → Queues → Enable
+
+This creates the pgmq_public schema with PostgREST-accessible wrapper functions.
+WITHOUT this step: supabase.rpc('send', ...) fails with "function not found".
+```
+
+After enabling, create your first queue:
+```
+Dashboard → Integrations → Queues → Add Queue
+  Name: embeddings_queue (or any name)
+  Type: Basic (durable) OR Unlogged (fast, non-durable)
+```
+
+---
+
+## Queue Types — Choose Before Creating
+
+| | Basic Queue | Unlogged Queue |
+|---|---|---|
+| Durability | WAL-logged — survives DB restart/crash | Not WAL-logged — messages LOST on crash |
+| Performance | Standard | ~2-3x faster writes |
+| Use for | Embedding jobs, email sends, critical tasks | Ephemeral notifications, cache invalidation |
+| Change type? | Cannot change — must recreate | Cannot change — must recreate |
+
+---
+
+## Critical: Use pgmq_public Schema for All RPC Calls
+
+```typescript
+// ❌ WRONG — pgmq functions are in pgmq_public schema, not public
+const { data } = await supabase.rpc('send', { queue_name: 'my_queue', message: {} })
+// Error: "Could not find the function public.send"
+
+// ✅ CORRECT — switch schema before calling
+const { data } = await supabase
+  .schema('pgmq_public')
+  .rpc('send', {
+    queue_name: 'embeddings_queue',
+    message: { document_id: 123, content: 'hello' },
+  })
+
+// Also applies to all other queue operations:
+// .schema('pgmq_public').rpc('read', ...)
+// .schema('pgmq_public').rpc('delete', ...)
+// .schema('pgmq_public').rpc('archive', ...)
+```
+
+---
+
+## Core Queue Operations
+
+### Send a message
+```typescript
+// Server-side (API route or Edge Function)
+const { data: msgId, error } = await supabase
+  .schema('pgmq_public')
+  .rpc('send', {
+    queue_name: 'embeddings_queue',
+    message: {                          // any JSON object
+      document_id: documentId,
+      user_id: user.id,
+      content: text,
+      priority: 'normal',
+    },
+  })
+// Returns: message ID (bigint)
+
+// Send with delay (message becomes visible after N seconds)
+const { data: msgId } = await supabase
+  .schema('pgmq_public')
+  .rpc('send_with_delay', {
+    queue_name: 'embeddings_queue',
+    message: { document_id: documentId },
+    delay_seconds: 30,                  // process 30 seconds from now
+  })
+```
+
+### Read messages (with visibility timeout)
+```typescript
+// Read up to 10 messages — hides them for 60s (vt = visibility timeout)
+// Other workers won't see these messages for 60 seconds
+// If not deleted within 60s → becomes visible again (automatic retry)
+const { data: messages } = await supabase
+  .schema('pgmq_public')
+  .rpc('read', {
+    queue_name: 'embeddings_queue',
+    vt: 60,                // visibility timeout in seconds
+    qty: 10,               // max messages to read
+  })
+
+// messages = [{ msg_id, read_ct, enqueued_at, vt, message }, ...]
+```
+
+### Delete after successful processing
+```typescript
+// ALWAYS delete after processing — prevents re-delivery
+const { error } = await supabase
+  .schema('pgmq_public')
+  .rpc('delete', {
+    queue_name: 'embeddings_queue',
+    msg_id: message.msg_id,
+  })
+
+// Or delete multiple at once
+await supabase.schema('pgmq_public').rpc('delete_batch', {
+  queue_name: 'embeddings_queue',
+  msg_ids: messages.map(m => m.msg_id),
+})
+```
+
+### Archive instead of delete (keep for audit)
+```typescript
+// Moves message to pgmq.a_[queue_name] archive table (not deleted)
+await supabase.schema('pgmq_public').rpc('archive', {
+  queue_name: 'embeddings_queue',
+  msg_id: message.msg_id,
+})
+```
+
+---
+
+## Edge Function Worker Pattern
+
+```typescript
+// supabase/functions/process-queue/index.ts
+// Triggered by pg_cron every 10 seconds
+
+Deno.serve(async (req: Request) => {
+  const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' }
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SECRET_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+
+  // Read batch of messages
+  const { data: messages, error } = await supabase
+    .schema('pgmq_public')
+    .rpc('read', { queue_name: 'embeddings_queue', vt: 60, qty: 10 })
+
+  if (error || !messages?.length) {
+    return new Response(JSON.stringify({ processed: 0 }), { headers: corsHeaders })
+  }
+
+  // Process in background — respond immediately
+  EdgeRuntime.waitUntil(
+    Promise.all(messages.map(async (msg: any) => {
+      try {
+        const { document_id, content } = msg.message
+
+        // Generate embedding
+        const session = new Supabase.ai.Session('gte-small')
+        const embedding = await session.run(content, { mean_pool: true, normalize: true })
+
+        // Update document section
+        await supabase
+          .from('document_sections')
+          .update({ embedding: Array.from(embedding) })
+          .eq('id', document_id)
+
+        // Delete message — successfully processed
+        await supabase.schema('pgmq_public').rpc('delete', {
+          queue_name: 'embeddings_queue',
+          msg_id: msg.msg_id,
+        })
+
+        console.log(`Processed message ${msg.msg_id}`)
+      } catch (err) {
+        console.error(`Failed message ${msg.msg_id}:`, err)
+        // Do NOT delete — message becomes visible again after vt expires → automatic retry
+      }
+    }))
+  )
+
+  return new Response(JSON.stringify({ processing: messages.length }), { headers: corsHeaders })
+})
+```
+
+```sql
+-- pg_cron: trigger the Edge Function worker every 10 seconds
+SELECT cron.schedule(
+  'process-embeddings-queue',
+  '*/10 * * * * *',   -- every 10 seconds (sub-minute syntax)
+  $$
+  SELECT net.http_post(
+    url     := current_setting('app.supabase_url') || '/functions/v1/process-queue',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || current_setting('app.service_role_key')
+    ),
+    body    := '{}'::JSONB
+  )
+  $$
+);
+```
+
+---
+
+## Long-Poll — Block Until Message Arrives
+
+More efficient than polling when queues are often empty.
+
+```typescript
+// Block for up to 5 seconds waiting for a message — no message = returns empty
+const { data: messages } = await supabase
+  .schema('pgmq_public')
+  .rpc('read_with_poll', {
+    queue_name: 'embeddings_queue',
+    vt: 60,
+    qty: 10,
+    max_poll_seconds: 5,         // wait up to 5s for a message
+    poll_interval_ms: 100,        // check every 100ms
+  })
+// Returns immediately when a message arrives
+// Returns empty array after max_poll_seconds with no messages
+```
+
+---
+
+## Client-Side Queue Access (RLS Required)
+
+To allow browser clients to add messages to a queue (e.g., user submits a job):
+
+```sql
+-- 1. Enable RLS on the queue table (replace 'embeddings_queue' with your queue name)
+ALTER TABLE pgmq.q_embeddings_queue ENABLE ROW LEVEL SECURITY;
+
+-- 2. Allow authenticated users to INSERT (send messages)
+CREATE POLICY "auth_users_send"
+ON pgmq.q_embeddings_queue FOR INSERT
+WITH CHECK (auth.role() = 'authenticated');
+
+-- 3. Only service_role can read/delete (workers use service_role)
+-- (no policy needed — service_role bypasses RLS)
+```
+
+```typescript
+// Client can now send messages after RLS setup
+const { data: msgId } = await supabase  // browser client — uses user's JWT
+  .schema('pgmq_public')
+  .rpc('send', {
+    queue_name: 'embeddings_queue',
+    message: { text: userInput, user_id: user.id },
+  })
+```
+
+---
+
+## Queue Monitoring
+
+```sql
+-- Message count by queue
+SELECT queue_name, msg_count, newest_msg_age_sec, oldest_msg_age_sec
+FROM pgmq.metrics_all();
+
+-- Messages in a specific queue (inspect without consuming)
+SELECT msg_id, enqueued_at, read_ct, message
+FROM pgmq.q_embeddings_queue
+ORDER BY enqueued_at DESC
+LIMIT 20;
+
+-- Check archived messages
+SELECT msg_id, archived_at, message
+FROM pgmq.a_embeddings_queue
+ORDER BY archived_at DESC
+LIMIT 20;
+```
+
+```
+Dashboard monitoring:
+Dashboard → Integrations → Queues → [queue name]
+Shows: message count, read count, oldest message age
+Real-time — refresh to see processing progress
+```
+
+---
+
+## Retry Behavior — How Automatic Retries Work
+
+```
+1. Worker reads message → message is HIDDEN for vt seconds
+2. Worker succeeds → worker calls delete() → message gone
+3. Worker FAILS (crash, exception) → does NOT call delete()
+4. After vt seconds → message becomes VISIBLE again
+5. Next worker poll reads it again → retry
+
+read_ct field tracks how many times a message has been read
+High read_ct (>3) = message failing repeatedly → investigate the error
+Set a dead letter queue or max retry alert when read_ct exceeds threshold:
+
+SELECT * FROM pgmq.q_embeddings_queue WHERE read_ct > 3;
+-- These are stuck messages — inspect message content and fix the worker
+```

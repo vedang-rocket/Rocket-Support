@@ -1,0 +1,35 @@
+{
+  "built_at": "2026-04-13T05:08:49.493776+00:00",
+  "sources": {
+    "supabase_ssr": {
+      "url": "https://raw.githubusercontent.com/supabase/supabase/master/apps/docs/content/guides/auth/server-side/creating-a-client.mdx",
+      "fetched_at": "2026-04-13T05:08:49.837417+00:00",
+      "size_chars": 21442,
+      "status": "ok"
+    },
+    "supabase_rls": {
+      "url": "https://raw.githubusercontent.com/supabase/supabase/master/apps/docs/content/guides/database/postgres/row-level-security.mdx",
+      "fetched_at": "2026-04-13T05:08:50.234845+00:00",
+      "size_chars": 25061,
+      "status": "ok"
+    },
+    "nextjs_middleware": {
+      "url": "https://raw.githubusercontent.com/vercel/next.js/canary/docs/01-app/03-api-reference/03-file-conventions/proxy.mdx",
+      "fetched_at": "2026-04-13T05:08:50.652979+00:00",
+      "size_chars": 29985,
+      "status": "ok"
+    },
+    "nextjs_cookies": {
+      "url": "https://raw.githubusercontent.com/vercel/next.js/canary/docs/01-app/03-api-reference/04-functions/cookies.mdx",
+      "fetched_at": "2026-04-13T05:08:51.005929+00:00",
+      "size_chars": 12034,
+      "status": "ok"
+    },
+    "nextjs_15_upgrade": {
+      "url": "https://raw.githubusercontent.com/vercel/next.js/canary/docs/01-app/02-guides/upgrading/version-15.mdx",
+      "fetched_at": "2026-04-13T05:08:51.412595+00:00",
+      "size_chars": 17072,
+      "status": "ok"
+    }
+  }
+}

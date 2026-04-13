@@ -1,0 +1,301 @@
+---
+description: >
+  where does middleware.ts go, project folder structure, what files does Rocket generate,
+  where is the supabase client, where is the auth callback, module not found cannot find file,
+  what imports what, changing one file breaks another, file not found at path,
+  supabase migrations folder, edge functions folder, what files should not be edited,
+  missing file after download, folder layout for Next.js App Router Rocket project,
+  dependency map ripple effect, what Rocket never generates needs to be added manually
+globs: ["**/*.ts", "**/*.tsx", "**/*.js"]
+alwaysApply: false
+---
+
+# Rocket.new — Project Architecture Reference
+
+> The exact folder structure Rocket generates. Use this to understand the codebase before touching anything.
+
+---
+
+## Complete File Tree — Next.js (TypeScript) — Standard Rocket Project
+
+```
+project-root/
+│
+├── middleware.ts                    # ← CRITICAL: at root, not in /app
+│                                    #   Calls updateSession() on every request
+│                                    #   Missing = sessions never refresh = auth breaks
+│
+├── app/
+│   ├── layout.tsx                   # Root layout — wraps ALL pages
+│   │                                # Contains: <html>, <body>, global providers
+│   │                                # NOT for page-specific data fetching
+│   │
+│   ├── page.tsx                     # Landing page (/)
+│   ├── globals.css                  # Global styles + Tailwind @layer imports
+│   │
+│   ├── (auth)/                      # Route GROUP — no URL segment added
+│   │   ├── login/
+│   │   │   └── page.tsx             # /login
+│   │   ├── signup/
+│   │   │   └── page.tsx             # /signup
+│   │   └── reset-password/
+│   │       └── page.tsx             # /reset-password
+│   │
+│   ├── (protected)/                 # Route GROUP — all routes inside are protected
+│   │   ├── layout.tsx               # Auth check here — getUser() → redirect if null
+│   │   ├── dashboard/
+│   │   │   ├── page.tsx             # /dashboard
+│   │   │   └── loading.tsx          # Auto-shown by Next.js while page.tsx loads
+│   │   ├── settings/
+│   │   │   └── page.tsx             # /settings
+│   │   └── profile/
+│   │       └── page.tsx             # /profile
+│   │
+│   ├── auth/
+│   │   └── callback/
+│   │       └── route.ts             # ← CRITICAL: OAuth + magic link exchange
+│   │                                #   Calls exchangeCodeForSession(code)
+│   │                                #   Missing = OAuth always fails
+│   │
+│   └── api/
+│       ├── stripe/
+│       │   └── checkout/
+│       │       └── route.ts         # POST: creates Stripe checkout session
+│       └── webhooks/
+│           └── stripe/
+│               └── route.ts         # POST: handles Stripe events
+│                                    # MUST use request.text() not request.json()
+│
+├── components/
+│   ├── ui/                          # Base UI: button, input, card, badge, etc.
+│   │   ├── button.tsx               # shadcn/ui or custom Rocket components
+│   │   ├── input.tsx
+│   │   └── card.tsx
+│   ├── layout/
+│   │   ├── navbar.tsx               # Navigation — often 'use client' for mobile menu
+│   │   ├── sidebar.tsx
+│   │   └── footer.tsx
+│   └── [feature]/                   # Feature-specific components
+│       └── [component].tsx
+│
+├── lib/
+│   └── supabase/
+│       ├── client.ts                # Browser client — 'use client' components ONLY
+│       ├── server.ts                # Server client — Server Components, Route Handlers, Actions
+│       └── middleware.ts            # updateSession() — called by root middleware.ts
+│
+├── supabase/                        # ← Rocket generates this, often overlooked
+│   ├── migrations/                  # SQL migration files — pushed to Supabase
+│   │   ├── 001_initial_schema.sql   # Push via Rocket UI or paste into Supabase SQL Editor
+│   │   ├── 002_add_profiles.sql
+│   │   └── [timestamp]_[name].sql
+│   └── functions/                   # Edge Functions (if any were created)
+│       └── [function-name]/
+│           └── index.ts
+│
+├── public/                          # Static assets served directly
+│   ├── images/
+│   └── _redirects                   # React SPA routing fix (Vite projects only)
+│
+├── .env.local                       # Local env vars — NEVER committed, NEVER auto-synced to Netlify
+├── .env.example                     # Template — safe to commit
+├── next.config.ts                   # Next.js configuration
+├── tailwind.config.ts               # Tailwind — always darkMode: 'class'
+├── tsconfig.json                    # TypeScript — includes @/* path alias
+└── package.json
+```
+
+---
+
+## The 5 Most Commonly Broken Files
+
+### 1. `middleware.ts` (root)
+**Why broken**: Placed inside `/app` instead of root, or missing entirely.
+**Effect**: JWT tokens never refresh → users logged out after 1 hour, seemingly randomly.
+```typescript
+// EXACT content required:
+import { type NextRequest } from 'next/server'
+import { updateSession } from '@/lib/supabase/middleware'
+
+export async function middleware(request: NextRequest) {
+  return await updateSession(request)
+}
+
+export const config = {
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+  ],
+}
+```
+
+### 2. `app/auth/callback/route.ts`
+**Why broken**: Missing entirely, or doesn't call `exchangeCodeForSession`.
+**Effect**: All OAuth and magic link flows redirect to an error page.
+```typescript
+// EXACT content required:
+import { NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url)
+  const code = searchParams.get('code')
+  const next = searchParams.get('next') ?? '/dashboard'
+
+  if (code) {
+    const supabase = await createClient()
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    if (!error) return NextResponse.redirect(`${origin}${next}`)
+  }
+  return NextResponse.redirect(`${origin}/login?error=auth_failed`)
+}
+```
+
+### 3. `lib/supabase/server.ts`
+**Why broken**: Uses old `createServerComponentClient` from deprecated package.
+**Effect**: Subtle SSR auth bugs, cookie setting failures, type errors.
+```typescript
+// EXACT current pattern (@supabase/ssr):
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
+
+export async function createClient() {
+  const cookieStore = await cookies()  // ← await required in Next.js 15
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() { return cookieStore.getAll() },
+        setAll(cookiesToSet) {
+          try {
+            cookiesToSet.forEach(({ name, value, options }) =>
+              cookieStore.set(name, value, options)
+            )
+          } catch {} // Server Component — cookies set in middleware instead
+        },
+      },
+    }
+  )
+}
+```
+
+### 4. `app/api/webhooks/stripe/route.ts`
+**Why broken**: Uses `request.json()` instead of `request.text()`.
+**Effect**: `StripeSignatureVerificationError` — subscription events never process.
+```typescript
+// CRITICAL PATTERN:
+export async function POST(request: Request) {
+  const body = await request.text()  // ← raw text, NEVER .json()
+  const sig = request.headers.get('stripe-signature')!
+  // ... rest of handler
+}
+```
+
+### 5. `supabase/migrations/` — The Most Overlooked Folder
+**Why broken**: Developers don't know this folder exists.
+**Effect**: When reconnecting to a new Supabase project, no tables exist because no one ran the migrations.
+```bash
+# When reconnecting Supabase, run ALL migrations in order:
+# 1. Open supabase/migrations/ in the project
+# 2. Copy each .sql file in timestamp order
+# 3. Paste into Supabase SQL Editor → Run
+# OR: reconnect in Rocket and push migrations from the UI
+```
+
+---
+
+## Dependency Map — What Imports What
+
+Understanding this prevents breaking callers when editing a file.
+
+```
+middleware.ts
+  └─ imports: lib/supabase/middleware.ts → updateSession()
+               (Do NOT import server.ts or client.ts here)
+
+app/[route]/page.tsx (Server Component)
+  └─ imports: lib/supabase/server.ts → createClient()
+               components/[feature]/...
+               lib/supabase/[queries].ts (if extracted)
+
+app/[route]/[component].tsx (Client Component — 'use client')
+  └─ imports: lib/supabase/client.ts → createClient()
+               (NOT server.ts — causes SSR/cookie errors)
+
+app/api/[route]/route.ts (Route Handler)
+  └─ imports: lib/supabase/server.ts → createClient()
+               stripe (if payment route)
+
+lib/supabase/middleware.ts
+  └─ imports: @supabase/ssr → createServerClient
+               next/server → NextResponse, NextRequest
+
+lib/supabase/server.ts
+  └─ imports: @supabase/ssr → createServerClient
+               next/headers → cookies
+
+lib/supabase/client.ts
+  └─ imports: @supabase/ssr → createBrowserClient
+```
+
+**Ripple effect rule**: If you edit `lib/supabase/server.ts` or `lib/supabase/client.ts`, every Server Component and Client Component is affected. Always check callers before changing these files.
+
+---
+
+## What Rocket NEVER Generates (Always Add Manually)
+
+These are consistently missing from every Rocket project and must be added when needed:
+
+| What | Where | Why Needed |
+|---|---|---|
+| Rate limiting on API routes | `app/api/[route]/route.ts` | AI/LLM endpoints get abused without it |
+| Input validation (Zod) | Server Actions, Route Handlers | Rocket generates no input validation |
+| Error logging (Sentry/etc.) | `app/layout.tsx`, `app/error.tsx` | No error tracking by default |
+| Database indexes | `supabase/migrations/` | Tables have no indexes — slow at scale |
+| Canonical URLs | `app/layout.tsx` metadata | Needed for SEO to avoid duplicate content |
+| `robots.txt` | `public/robots.txt` | Not generated by default |
+| `sitemap.xml` | `app/sitemap.ts` | Must be added manually |
+| CSRF protection | API routes | Not generated — use `next-csrf` or Origin check |
+| Image optimization config | `next.config.ts` | Remote image domains must be whitelisted |
+
+### Adding Image Domains (Most Common Missing Config)
+```typescript
+// next.config.ts
+const nextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '[your-supabase-id].supabase.co',
+        pathname: '/storage/v1/object/public/**',
+      },
+    ],
+  },
+}
+```
+
+### Adding Rate Limiting to AI Endpoints
+```typescript
+// Simple rate limit using Supabase
+import { createClient } from '@/lib/supabase/server'
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return new Response('Unauthorized', { status: 401 })
+  
+  // Check usage count for today
+  const today = new Date().toISOString().split('T')[0]
+  const { count } = await supabase
+    .from('ai_usage')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', user.id)
+    .gte('created_at', today)
+  
+  if ((count ?? 0) >= 50) {
+    return new Response('Rate limit exceeded', { status: 429 })
+  }
+  // ... rest of handler
+}
+```
+

@@ -1,0 +1,260 @@
+---
+description: >
+  how to connect Stripe, Stripe payment not working, which email service to use Resend vs SendGrid,
+  how to add OpenAI to Rocket project, Google Analytics setup measurement ID, Stripe test cards,
+  email going to spam SPF DKIM, how to connect custom API postman swagger cURL import,
+  CORS error calling external API, Netlify custom domain setup, GitHub one-way export,
+  Mixpanel vs Google Analytics, Calendly Cal.com scheduling, Airtable Supabase Strapi difference,
+  webhook endpoint not receiving events, email from address rejected, API 401 unauthorized
+alwaysApply: false
+---
+
+# Rocket.new — Integrations Expert Reference (Web)
+
+## How to Connect Any Integration
+1. **Via chat**: "Connect [service] to my project" — Rocket prompts for API key
+2. **Via Project Settings**: Open project → Settings → Integrations → select service
+3. API keys are encrypted at rest and never exposed in generated code
+4. Disconnect: Project Settings → Integrations → Disconnect
+
+---
+
+## 💳 STRIPE
+
+### Setup
+1. stripe.com → Dashboard → Developers → API Keys
+2. Use **test keys** (`sk_test_`) during development
+3. Rocket: Project Settings → Integrations → Stripe → paste Secret Key
+4. Then prompt: "Add a $19/month Pro subscription with Stripe checkout on the pricing page"
+
+### Test Cards
+| Card | Result |
+|---|---|
+| `4242 4242 4242 4242` | Successful payment |
+| `4000 0000 0000 9995` | Insufficient funds |
+| `4000 0025 0000 3155` | 3D Secure required |
+Any future expiry date, any 3-digit CVC.
+
+### Common Stripe Issues
+| Issue | Fix |
+|---|---|
+| "No such customer" | Test/live key mismatch — use matching key environment |
+| Payment succeeds but subscription not created | Webhook not received — add endpoint in Stripe dashboard |
+| "Invalid API Key" | Re-copy key fresh from Stripe dashboard |
+| Card declined in test | Wrong test card — use 4242 4242 4242 4242 |
+| Works in preview, fails in production | Still on test keys — switch to live keys for prod |
+| Webhook not firing | Add your Netlify production URL to Stripe → Webhooks |
+
+### Webhook Setup (Critical for Subscriptions)
+1. Stripe Dashboard → Developers → Webhooks → Add endpoint
+2. Endpoint URL: `https://your-production-app.netlify.app/api/webhook`
+3. Events to listen for:
+   - `customer.subscription.created`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+   - `invoice.payment_succeeded`
+   - `invoice.payment_failed`
+4. Copy Webhook Secret → add as env var in Rocket Code View or Netlify dashboard
+
+---
+
+## 📧 EMAIL SERVICES
+
+### Which to Recommend
+| Service | Best For | Free Tier |
+|---|---|---|
+| **Resend** | Developer-first transactional email | 3,000/month |
+| **SendGrid** | High volume, marketing + transactional | 100/day |
+| **Brevo** | All-in-one email + marketing automation | 300/day |
+| **MailerLite** | Newsletters, simple UI | 12,000/month |
+| **Mailchimp** | Audience management, campaigns | 500 contacts |
+| **Twilio** | SMS + WhatsApp only (not email) | Pay per message |
+
+### Common Email Issues
+| Issue | Fix |
+|---|---|
+| Emails going to spam | Verify domain SPF/DKIM records in email service |
+| "From" address rejected | Must use verified domain, not Gmail/Yahoo |
+| Emails not sending in production | Check API key is set for production environment |
+| Resend free tier | 3,000/month is enough for small/medium apps |
+
+---
+
+## 🤖 AI MODEL INTEGRATIONS
+
+### Comparison for Web Apps
+| Model | Best For | Speed | Cost |
+|---|---|---|---|
+| **OpenAI GPT-4o** | Versatile, chat, content gen | Medium | High |
+| **GPT-4o-mini** | Real-time chat, fast responses | Fast | Low |
+| **Anthropic Claude** | Long context, nuanced, safe outputs | Medium | Medium |
+| **Gemini** | Multimodal (text + image) | Fast | Medium |
+| **Perplexity** | Search-augmented, cited answers | Medium | Low |
+
+### Setup Pattern
+1. Get API key from provider dashboard
+2. Rocket chat: "Connect OpenAI to my project"
+3. Paste API key
+4. Prompt: "Add a chat interface powered by GPT-4o on the [page] page. Store conversation history in Supabase."
+
+### Common AI Integration Issues
+| Issue | Fix |
+|---|---|
+| 401 from AI API | API key wrong or expired — regenerate from provider |
+| Rate limits | Free tier limits hit — upgrade API plan or add retry logic |
+| Responses too slow | Use GPT-4o-mini or Gemini Flash for real-time chat |
+| Response cut off | Increase `max_tokens` — ask Rocket: "increase max tokens for AI response" |
+| AI going off-topic | Add system prompt — ask Rocket: "add a system prompt that limits AI to only discuss [topic]" |
+| High API costs | Use streaming responses + set max_tokens limit |
+
+---
+
+## 🗄️ DATABASES & CMS
+
+### Supabase (Primary — see rocket-supabase.mdc for full details)
+- PostgreSQL + Auth + Storage + Edge Functions
+- Always the first choice for serious apps
+
+### Airtable
+- Use for: leads, CRM, internal tools, lightweight inventory
+- Not for: complex relational data, high-volume production apps
+- Free tier limit: 1,200 records/base
+
+### Strapi / Directus (Headless CMS)
+- Use for: content-heavy sites, blogs, multi-author publishing
+- Requires separate hosting (not hosted inside Rocket)
+- Connect via REST API in Rocket
+
+---
+
+## 📊 ANALYTICS
+
+### Google Analytics (GA4)
+- Command: `/Setup Google Analytics use measurement ID G-XXXXXXX`
+- Tracks: page views, user journeys, conversions, traffic sources
+- Free, unlimited
+
+### Mixpanel
+- Better for: SaaS metrics, user behavior, conversion funnels, per-user analytics
+- Free: 20M events/month
+
+### Common Analytics Issues
+| Issue | Fix |
+|---|---|
+| No data in GA4 | Check measurement ID format: G-XXXXXXX not UA-XXXXXXX |
+| Events not firing | Ad blockers are blocking scripts — expected behavior, not a bug |
+| GDPR cookie consent blocking analytics | Add consent check before initializing analytics |
+
+---
+
+## 📋 FORMS & SCHEDULING
+
+### Forms
+| Service | Best For |
+|---|---|
+| **Typeform** | Lead capture, surveys, conversational UX |
+| **Tally** | Simple, free, fast to set up |
+
+### Scheduling
+| Service | Best For |
+|---|---|
+| **Calendly** | Simple booking, calendar sync, wide adoption |
+| **Cal.com** | Open-source, full customization, Next.js native |
+
+---
+
+## 🔌 CUSTOM API INTEGRATION
+
+### Import Methods
+| Method | Use When |
+|---|---|
+| **cURL** | You have a working cURL command |
+| **Postman JSON** | You have a Postman collection export |
+| **Swagger/OpenAPI** | API has a spec file (.json or .yaml) |
+| **Postman workspace key** | You use Postman workspaces |
+
+### API Troubleshooting
+| Problem | Cause | Fix |
+|---|---|---|
+| API not in picker | Import incomplete | Re-open Add APIs, re-import |
+| `{{accessToken}}` placeholder | Unmapped variable | Bind to state/env var during setup |
+| UI not updating after call | Response not stored | Update "Post API call instructions" to store response |
+| 401 Unauthorized | Bad/missing auth header | Add `Bearer <token>` to Authorization header in Pre-call instructions |
+| CORS error | API blocks browser requests | Create a Supabase Edge Function proxy |
+| Works in preview, fails in prod | Hardcoded localhost URL | Update API base URL to production URL |
+
+### CORS Workaround (Most Advanced Common Issue)
+When an external API rejects browser requests, create a Supabase Edge Function as a server-side proxy:
+1. Ask Rocket in chat: "Create a Supabase edge function that proxies requests to [API endpoint] and handles CORS"
+2. The function runs server-side, bypassing browser CORS restrictions
+3. Update API calls in your app to hit the edge function URL instead
+
+---
+
+## 🎨 FIGMA INTEGRATION
+
+### Setup
+1. Figma → Share → Copy link → ensure "Anyone with link" = "Can view"
+2. Start new Rocket project → "From Figma" → paste URL
+
+### Best Practices for Import Quality
+- Use auto-layout on all frames (not absolute positioning)
+- Keep component nesting under 3 levels
+- Use standard frame sizes: 1440px desktop, 1280px, 768px tablet, 375px mobile
+- Name layers meaningfully: "Hero Section", "Nav Bar" — not "Frame 47"
+- Export icons as SVG, not PNG
+
+### Figma Troubleshooting
+| Issue | Fix |
+|---|---|
+| "Same Figma URL already used" | Use different file, or delete old project using that URL |
+| Not generating code | Check plan screen limit; check link permissions; rate limit → wait 10–15 min |
+| Generated code looks wrong | Follow design guidelines above; simplify component nesting |
+| Want to add new screens | "Add Figma screens" option (web only) |
+| Want to update existing screens | Not supported yet — re-add screens or re-prompt in chat |
+
+---
+
+## 🔗 GITHUB INTEGRATION
+
+### Export Setup
+1. Project Settings → Integrations → GitHub → authorize
+2. Create new repo OR push to existing
+3. Click Push → Rocket exports all code
+
+### After Export — Local Development
+```bash
+git clone https://github.com/your-username/your-repo
+cd your-repo
+npm install
+cp .env.example .env.local   # add your real Supabase keys
+npm run dev                  # runs at http://localhost:3000
+```
+
+### Key Limits
+- **One-way only**: Rocket → GitHub. Cannot import back into Rocket.
+- **No auto-sync**: Must manually push from Rocket after each major change
+- **Two-way sync**: On roadmap, not available yet
+
+---
+
+## 🌐 NETLIFY INTEGRATION
+
+### Auto Deploy (Handled by Rocket)
+- Click "Launch" → "Publish to web" — Rocket handles everything
+- Each new publish creates a new deployment
+- Custom domain: connect Netlify account in project settings
+
+### What Needs Manual Setup in Netlify
+- **Custom domains**: Add in Netlify dashboard → domain management
+- **Production env vars**: Add in Netlify dashboard → site → environment variables
+- **Build hooks**: If using external CI/CD
+- **Redirects**: Add `netlify.toml` or `_redirects` file in Code View for SPA routing
+
+### SPA Routing Fix (Common)
+React SPA with client-side routing breaks on direct URL access/page refresh.
+Fix: In Code View, create `public/_redirects`:
+```
+/*  /index.html  200
+```
+

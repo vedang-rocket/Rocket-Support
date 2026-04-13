@@ -1,0 +1,186 @@
+---
+description: >
+  slash commands in Rocket, /fix-layout command, /update-content command, /add-supabase-authentication,
+  /add-stripe-payments, /fix-navigation, @filename command, visual edit commands,
+  /generate-seo-report, /improve-accessibility, /change-app-theme, /add-light-dark-theme,
+  how to use commands in Rocket chat, /remove-element, /restructure-screen-layout,
+  /fix-theme-switching, /organize-code, @ scoped edits, command not working in Rocket
+alwaysApply: false
+---
+
+# Rocket.new — Web Commands Reference
+
+> ⚠️ Commands only work in the **web browser**. Not supported in the iOS app.
+>
+> Token tip: One specific command uses far fewer tokens than a long vague chat prompt.
+
+---
+
+## Two Command Types
+
+| | `/` Commands | `@` Commands |
+|---|---|---|
+| What | Screen-aware shortcuts for current open page | Target a specific file or folder |
+| How | Type `/` → popup → select or type to filter | Type `@` → file picker → select file/folder |
+| Scope | Auto-targets the currently open screen | Locked to your selected file/folder |
+| Best for | Quick actions, fixes, integrations, layout | Precise single-file or single-component edits |
+
+---
+
+## Web Project `/` Commands — Full List
+
+### Brand & Identity
+| Command | What It Does |
+|---|---|
+| `/Update App Logo` | Replace logo across all pages — attach file first |
+| `/Update App Name` | Change name in titles, nav, metadata across whole app |
+| `/Change App Theme` | Apply new color scheme across entire app |
+| `/Add Light/Dark Theme` | Add a coordinated light/dark theme toggle |
+
+### Layout & Content
+| Command | What It Does |
+|---|---|
+| `/Update Content` | Replace text, copy, or placeholders on current page |
+| `/Change Element` | Swap an existing element type (e.g. image → video) |
+| `/Add Element` | Insert a new UI element into the current page |
+| `/Remove Element` | Delete a UI element with auto layout reflow |
+| `/Remove Screen` | Delete an entire page including its route and nav references |
+| `/Restructure Screen Layout` | Redesign the current page's layout pattern |
+
+### Quick Fixes
+| Command | What It Does |
+|---|---|
+| `/Fix Layout Issues` | Auto-fix spacing, alignment, responsiveness on current page |
+| `/Fix Navigation Issues` | Resolve routing or nav link problems |
+| `/Fix Theme Switching` | Fix light/dark mode toggle not working correctly |
+| `/Organize Code` | Refactor large files into smaller modules (specify file with `@`) |
+
+### Visual & Media
+| Command | What It Does |
+|---|---|
+| `/Add Page Transitions` | Smooth animated transitions between pages |
+| `/Generate Image` | AI-generated image placed at a named location on page |
+| `/Generate SVG Illustration` | Custom vector illustrations, icons, diagrams |
+
+### AI Features
+| Command | What It Does |
+|---|---|
+| `/Add AI Chatbot` | Add an AI-powered chat assistant widget to the app |
+| `/Suggest What to Build Next` | Get AI recommendations for next features based on current app |
+
+### Integrations
+| Command | What It Does |
+|---|---|
+| `/Add Supabase Authentication` | Full auth flow: login, signup, forgot password |
+| `/Add Social Authentication` | OAuth providers: Google, GitHub, Apple |
+| `/Fix Supabase Authentication Issues` | Auto-diagnose and fix common Supabase auth problems |
+| `/Add Stripe Payments` | One-time checkout or subscription payments |
+| `/Add Email Alerts` | Automated emails (uses Twilio email integration) |
+| `/Add WhatsApp Messages` | Automated WhatsApp messages via Twilio |
+| `/Add Text Messages (SMS)` | SMS/OTP verification via Twilio |
+| `/Setup Google Analytics` | Configure GA4 tracking on the app |
+| `/Setup Adsense` | Place Google AdSense display ad units |
+
+### Language Support
+| Command | What It Does |
+|---|---|
+| `/Add RTL Support` | Right-to-left layout support (Arabic, Hebrew) |
+| `/Add Multiple Languages` | ⚠️ See warning below |
+
+> **⚠️ `/Add Multiple Languages` WARNING**: This command frequently causes translation contamination and "fix loop" spirals. Multiple users have spent $100–$250+ trying to fix broken multi-language apps. Only use for very simple apps. For serious apps, build the full primary-language version first, then manually add translations one language at a time using `@` commands scoped to the translation files.
+
+### SEO, Accessibility & Privacy
+| Command | What It Does |
+|---|---|
+| `/Generate SEO Report` | Audit and report on current SEO state |
+| `/Improve SEO` | Apply SEO improvements to the codebase |
+| `/Improve GEO And AEO` | Generative Engine + Answer Engine Optimization |
+| `/Generate GEO And AEO Report` | GEO/AEO audit report |
+| `/Generate Accessibility Report` | WCAG 2.1 AA compliance audit |
+| `/Improve Accessibility Audit` | Apply WCAG 2.1 AA accessibility fixes |
+| `/Implement Privacy Compliance` | GDPR/cookie consent infrastructure |
+| `/Generate Privacy Report` | Data handling and compliance audit |
+
+---
+
+## `@` Commands — File-Scoped Edits
+
+### How to Use
+1. Type `@` anywhere in the chat input
+2. File & Folders picker appears
+3. Search for and select your target file or folder
+4. Continue typing your instruction after the `@file` reference
+
+### Example Patterns
+```
+@app/page.tsx fix the hero section — the CTA button is not linking to /signup
+
+@components/nav.tsx add active state styling to highlight the current page link
+
+@lib/supabase.ts add proper error handling and logging to the signIn function
+
+@app/pricing/page.tsx change "Get started" to "Start free trial" on all three plan cards
+
+@components/empty-state.tsx rewrite the empty state message to be more encouraging
+and add a single call-to-action button linking to /create
+```
+
+### When `@` Beats Chat
+- You know exactly which file needs changing
+- The change is in one component and you don't want anything else touched
+- You're debugging a specific function without risking the rest of the app
+- Scoping a translation file update when adding languages
+
+### `@` Troubleshooting
+| Problem | Fix |
+|---|---|
+| Can't find file in picker | Type exact filename including extension and parent folder |
+| Edit still affected other files | Split into smaller messages, one `@file` per message |
+| Wrong file was targeted | Use the full path: `@app/dashboard/components/chart.tsx` |
+
+---
+
+## Phrasing Patterns That Save Tokens
+
+**Replace specific text (most efficient):**
+```
+/Update Content change "Get started" to "Start free trial" in the hero section CTA button
+```
+
+**Fix a specific area:**
+```
+/Fix Layout Issues in the pricing grid on tablet and mobile breakpoints
+```
+
+**Insert at exact location:**
+```
+/Add Element add a sticky "Book a call" button in the top-right corner of the header,
+visible only when user has scrolled past the hero section
+```
+
+**Scoped file fix:**
+```
+@components/checkout-form.tsx fix the form validation — the email field accepts
+invalid formats and the submit button doesn't show a loading state
+```
+
+**Targeted content update:**
+```
+@app/about/page.tsx replace the team section with three cards:
+Card 1: Name "Sarah Chen", Role "CEO", Bio "10 years in fintech"
+Card 2: Name "James Park", Role "CTO", Bio "Previously at Stripe"
+Card 3: Name "Mia Torres", Role "Head of Design", Bio "Ex-Figma"
+```
+
+---
+
+## Command Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Nothing changed | Confirm you're on the correct screen; for text, quote exact copy in "quotes"; name the area precisely |
+| Layout still wrong after fix | Try `/Fix Layout Issues for tablet and mobile breakpoints` |
+| Can't find file for `@` | Type the exact filename + extension in the picker search |
+| Edit was too broad | Split into multiple `@` commands, one file per message |
+| Command didn't trigger popup | Make sure `/` is at the start of the message or in the input box |
+

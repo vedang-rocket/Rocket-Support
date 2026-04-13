@@ -1,0 +1,409 @@
+---
+description: >
+  supabase import data CSV upload, import postgres dump pg_dump restore,
+  supabase realtime broadcast presence channel, supabase storage file upload
+  bucket policy storage RLS, supabase edge function typescript deploy invoke,
+  supabase local development CLI, database migrations supabase CLI generate,
+  supabase data seed test data, postgres full text search tsvector,
+  supabase database functions stored procedures, supabase webhooks database webhooks,
+  supabase storage signed URL public URL, row level security storage bucket
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase — Data, Storage, Realtime & Edge Functions Reference
+
+---
+
+## Importing Data
+
+### Option 1 — CSV Import via Dashboard
+```
+Supabase Dashboard → Table Editor → [your table] → Import data
+Supports CSV and spreadsheets. Column names must match exactly.
+```
+
+### Option 2 — SQL INSERT from CSV (via SQL Editor)
+```sql
+-- If your table already exists, use COPY
+COPY your_table(col1, col2, col3)
+FROM '/tmp/data.csv'
+WITH (FORMAT csv, HEADER true, DELIMITER ',');
+
+-- Note: COPY requires superuser. Use pg_read_file for user-level:
+INSERT INTO your_table(col1, col2)
+SELECT col1, col2
+FROM pg_read_file('/tmp/data.csv');
+```
+
+### Option 3 — From your Next.js app (recommended for user uploads)
+```typescript
+// app/api/import/route.ts
+import { createClient } from '@/lib/supabase/server'
+import { NextRequest, NextResponse } from 'next/server'
+
+export async function POST(request: NextRequest) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const formData = await request.formData()
+  const file = formData.get('file') as File
+  const text = await file.text()
+
+  const rows = text.split('\n').slice(1)  // skip header
+    .filter(Boolean)
+    .map(row => {
+      const [name, email, amount] = row.split(',')
+      return { name: name.trim(), email: email.trim(), amount: parseFloat(amount) }
+    })
+
+  const { error } = await supabase.from('your_table').insert(rows)
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  return NextResponse.json({ imported: rows.length })
+}
+```
+
+### Option 4 — pg_dump / restore (migrating from another DB)
+```bash
+# Export from source database
+pg_dump -h source-host -U postgres -d mydb > backup.sql
+
+# Restore to Supabase
+# Get connection string from: Supabase Dashboard → Settings → Database → Connection string
+psql "postgresql://postgres:[password]@[host]:5432/postgres" < backup.sql
+```
+
+---
+
+## Realtime — Live Data Subscriptions
+
+### Postgres Changes (most common — listens to table changes)
+```typescript
+'use client'
+import { useEffect, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+
+export function RealtimeMessages() {
+  const [messages, setMessages] = useState<Message[]>([])
+  const supabase = createClient()
+
+  useEffect(() => {
+    // Initial load
+    supabase.from('messages').select('*').then(({ data }) => {
+      if (data) setMessages(data)
+    })
+
+    // Subscribe to changes
+    const channel = supabase
+      .channel('messages-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',           // INSERT | UPDATE | DELETE | *
+          schema: 'public',
+          table: 'messages',
+          filter: 'room_id=eq.123'  // optional filter
+        },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            setMessages(prev => [...prev, payload.new as Message])
+          }
+          if (payload.eventType === 'DELETE') {
+            setMessages(prev => prev.filter(m => m.id !== payload.old.id))
+          }
+          if (payload.eventType === 'UPDATE') {
+            setMessages(prev => prev.map(m => m.id === payload.new.id ? payload.new as Message : m))
+          }
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [])
+
+  return <>{messages.map(m => <div key={m.id}>{m.content}</div>)}</>
+}
+```
+
+**Critical security gaps with Postgres Changes (read before using):**
+```
+1. RLS is NOT applied to DELETE payloads.
+   Postgres cannot verify access to a deleted row — the full row data is unavailable.
+   For DELETE events, only the primary key is returned (not the full row).
+   Never rely on RLS to protect DELETE payload data in Postgres Changes.
+
+2. REPLICA IDENTITY FULL + DELETE interaction:
+   When REPLICA IDENTITY FULL is set AND the row is deleted,
+   old_record contains the full row data — but RLS is still NOT checked.
+   A user subscribed to changes can receive deleted rows they should not see.
+   Fix: use private channels + realtime.messages RLS to gate the channel itself.
+
+3. Private schema tables need explicit GRANTs:
+   Postgres Changes only works with public schema by default.
+   For tables in other schemas: GRANT SELECT ON schema.table TO authenticated, anon;
+```
+
+**Requirement**: Table must have `REPLICA IDENTITY FULL` for UPDATE/DELETE payloads:
+```sql
+ALTER TABLE messages REPLICA IDENTITY FULL;
+```
+
+### Broadcast (custom events between clients — no DB writes)
+```typescript
+// Send
+const channel = supabase.channel('room-123')
+await channel.subscribe()
+channel.send({ type: 'broadcast', event: 'cursor', payload: { x: 100, y: 200 } })
+
+// Receive
+channel.on('broadcast', { event: 'cursor' }, (payload) => {
+  console.log('Cursor moved:', payload)
+})
+```
+
+### Presence (who is online)
+```typescript
+const channel = supabase.channel('room-123')
+
+// Track current user's presence
+await channel.subscribe(async (status) => {
+  if (status === 'SUBSCRIBED') {
+    await channel.track({ user_id: user.id, username: user.email, online_at: new Date() })
+  }
+})
+
+// Listen to presence changes
+channel.on('presence', { event: 'sync' }, () => {
+  const state = channel.presenceState()
+  console.log('Online users:', Object.values(state).flat())
+})
+```
+
+---
+
+## Storage — File Uploads
+
+### Setup: create a bucket
+```
+Supabase Dashboard → Storage → New bucket
+Name: profile-images (or similar)
+Public: false (use signed URLs for private, true for public CDN)
+```
+
+### Storage RLS policies (required even for public buckets for writes)
+```sql
+-- Allow authenticated users to upload their own files
+CREATE POLICY "users_upload_own_files"
+ON storage.objects FOR INSERT
+WITH CHECK (
+  bucket_id = 'profile-images'
+  AND auth.uid()::TEXT = (storage.foldername(name))[1]
+);
+
+-- Allow public read on a public bucket
+CREATE POLICY "public_read"
+ON storage.objects FOR SELECT
+USING (bucket_id = 'profile-images');
+
+-- Allow users to delete their own files
+CREATE POLICY "users_delete_own"
+ON storage.objects FOR DELETE
+USING (
+  bucket_id = 'profile-images'
+  AND auth.uid()::TEXT = (storage.foldername(name))[1]
+);
+```
+
+### Upload a file (client-side)
+```typescript
+'use client'
+export async function uploadProfileImage(file: File, userId: string) {
+  const supabase = createClient()
+  const fileExt = file.name.split('.').pop()
+  const filePath = `${userId}/avatar.${fileExt}`  // folder = userId
+
+  const { error } = await supabase.storage
+    .from('profile-images')
+    .upload(filePath, file, {
+      upsert: true,        // overwrite if exists
+      contentType: file.type
+    })
+
+  if (error) throw error
+
+  // Get public URL (for public buckets)
+  const { data } = supabase.storage
+    .from('profile-images')
+    .getPublicUrl(filePath)
+
+  return data.publicUrl
+}
+```
+
+### Signed URL (for private buckets)
+```typescript
+// Server-side — use server client
+const supabase = await createClient()
+const { data, error } = await supabase.storage
+  .from('private-files')
+  .createSignedUrl(filePath, 3600)  // expires in 1 hour
+
+return data?.signedUrl  // use in <img src={signedUrl}>
+```
+
+### Image optimization (built-in)
+```typescript
+// Resize and transform images on the fly
+const { data } = supabase.storage
+  .from('profile-images')
+  .getPublicUrl(filePath, {
+    transform: {
+      width: 100,
+      height: 100,
+      resize: 'cover',    // or 'contain' | 'fill'
+      quality: 80,
+    }
+  })
+```
+
+### Next.js config for Supabase Storage images
+```typescript
+// next.config.ts — required for <Image> component
+const nextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '[PROJECT_REF].supabase.co',
+        pathname: '/storage/v1/object/public/**',
+      },
+    ],
+  },
+}
+```
+
+---
+
+## Edge Functions
+
+Typescript functions that run on Deno at the edge, close to users.
+
+### Create and deploy
+```bash
+# Create
+supabase functions new my-function
+
+# Deploy
+supabase functions deploy my-function --project-ref [REF]
+```
+
+### Basic Edge Function template
+```typescript
+// supabase/functions/my-function/index.ts
+import { createClient } from 'jsr:@supabase/supabase-js@2'
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+Deno.serve(async (req: Request) => {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  try {
+    // Get auth user from the request
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_ANON_KEY')!,
+      { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+    )
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return new Response('Unauthorized', { status: 401, headers: corsHeaders })
+
+    const body = await req.json()
+
+    // Your logic here
+    const result = { message: 'Hello!', userId: user.id }
+
+    return new Response(JSON.stringify(result), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    })
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    })
+  }
+})
+```
+
+### Call from Next.js
+```typescript
+// app/api/my-route/route.ts
+const { data, error } = await supabase.functions.invoke('my-function', {
+  body: { someData: 'value' }
+})
+```
+
+---
+
+## Full Text Search
+
+No extension needed — built into PostgreSQL.
+
+```sql
+-- Add a tsvector column for fast search
+ALTER TABLE posts ADD COLUMN fts TSVECTOR
+  GENERATED ALWAYS AS (to_tsvector('english', COALESCE(title, '') || ' ' || COALESCE(content, ''))) STORED;
+
+CREATE INDEX posts_fts_idx ON posts USING gin(fts);
+```
+
+```typescript
+// Search from Next.js
+const { data } = await supabase
+  .from('posts')
+  .select()
+  .textSearch('fts', query, { type: 'websearch' })
+// 'websearch' supports AND, OR, - operators like real search engines
+```
+
+---
+
+## Database Webhooks
+
+Trigger HTTP requests on table changes (no pg_net needed — Supabase manages it).
+
+```
+Supabase Dashboard → Database → Webhooks → Create new webhook
+
+Config:
+- Table: orders
+- Events: INSERT, UPDATE
+- URL: https://your-app.netlify.app/api/webhooks/supabase
+- HTTP method: POST
+- Secret: [generate and store in env vars]
+```
+
+```typescript
+// app/api/webhooks/supabase/route.ts
+export async function POST(request: NextRequest) {
+  // Verify the webhook secret
+  const secret = request.headers.get('x-webhook-secret')
+  if (secret !== process.env.SUPABASE_WEBHOOK_SECRET) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const payload = await request.json()
+  const { type, record, old_record, table } = payload
+
+  if (table === 'orders' && type === 'INSERT') {
+    // New order created — send confirmation email
+    await sendOrderConfirmation(record)
+  }
+
+  return NextResponse.json({ ok: true })
+}
+```

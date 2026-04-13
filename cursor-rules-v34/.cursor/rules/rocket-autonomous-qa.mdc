@@ -1,0 +1,129 @@
+---
+description: >
+  autonomous code review, post-commit review automatic, code review after commit,
+  self-reviewing system, QA without manual trigger, automatic rule violation detection,
+  code-review-log.md, install git hooks, post-commit hook setup, review every commit,
+  automatic quality gate, no manual review needed, audit every change automatically
+globs: []
+alwaysApply: false
+---
+
+# Rocket.new — Autonomous Quality Assurance System
+
+> Quality is no longer a manual step. It is an automatic property of every commit.
+> Every time you commit code, the system automatically checks it against every rule.
+> You do not have to remember to run /review-diff. It runs itself.
+
+---
+
+## SETUP (One command per project)
+
+```bash
+sh .cursor/hooks-scripts/install-git-hooks.sh
+```
+
+This installs the post-commit review hook. After this, every `git commit` automatically:
+1. Scans changed files against all critical rules
+2. Reports violations in the terminal immediately
+3. Logs everything to `memory-bank/code-review-log.md`
+
+---
+
+## WHAT IT CHECKS ON EVERY COMMIT
+
+| Check | Rule | Severity |
+|---|---|---|
+| `// ... existing code` in any file | Lazy Delete bug | 🔴 Critical |
+| `getSession()` in .ts/.tsx files | Server auth pattern | 🔴 Critical |
+| `request.json()` in webhook routes | Stripe signature | 🔴 Critical |
+| `NEXT_PUBLIC_` on service role key | Secret exposure | 🔴 Critical |
+| `middleware.ts` inside `/app/` | Wrong location | 🔴 Critical |
+| Unawaited `cookies()` | Next.js 15 | 🟡 Warning |
+
+---
+
+## THE WORKFLOW
+
+```
+You accept a Cursor fix
+        ↓
+git add -A && git commit -m "fix: auth session"
+        ↓
+post-commit hook fires automatically (< 1 second)
+        ↓
+Scans every changed file
+        ↓
+❌ Issues found → reported in terminal instantly
+✅ No issues → "AI code review passed" confirmation
+        ↓
+Everything logged to memory-bank/code-review-log.md
+```
+
+---
+
+## READING THE REVIEW LOG
+
+```bash
+# See the last 20 review entries
+tail -100 memory-bank/code-review-log.md
+
+# See only failed reviews
+grep -A5 "REVIEW NEEDED" memory-bank/code-review-log.md
+
+# Count total commits reviewed
+grep -c "^## \[" memory-bank/code-review-log.md
+```
+
+---
+
+## WHEN THE HOOK FINDS ISSUES
+
+The hook reports issues but does NOT block the commit.
+(Blocking commits creates friction — reporting creates awareness.)
+
+When issues are reported:
+1. Read the specific violation
+2. Run the appropriate fix command (`/fix-auth`, `/debug-error`, etc.)
+3. Fix the issue
+4. Commit again — the hook will confirm it's clean
+
+---
+
+## EXTENDING THE HOOK
+
+To add a new check to `post-commit-review.sh`:
+
+```bash
+# Add after the existing checks, before "Compile all issues"
+
+NEW_PATTERN=$(echo "$CHANGED_FILES" | while read f; do
+  if [ -f "$f" ]; then
+    if grep -q "YOUR_PATTERN" "$f" 2>/dev/null; then
+      echo "❌ YOUR_MESSAGE in $f"
+    fi
+  fi
+done)
+
+# Add to ALL_ISSUES compilation:
+[ -n "$NEW_PATTERN" ] && ALL_ISSUES="$ALL_ISSUES\n$NEW_PATTERN"
+```
+
+Every time /capture-convention creates a new rule → add it to the hook too.
+The QA system should be as current as the rules.
+
+---
+
+## THE THREE-LAYER QUALITY SYSTEM
+
+```
+Layer 1 — Pre-change:    /review-diff (manual, before accepting)
+Layer 2 — Post-commit:   post-commit hook (automatic, after committing)
+Layer 3 — Weekly:        weekly-security-sweep automation (background, scheduled)
+```
+
+Together these three layers mean:
+- Nothing bad gets accepted without a chance to catch it (/review-diff)
+- Nothing bad gets committed without being flagged (post-commit hook)
+- Nothing bad accumulates over time without being surfaced (weekly sweep)
+
+**Quality is no longer a decision. It is the default.**

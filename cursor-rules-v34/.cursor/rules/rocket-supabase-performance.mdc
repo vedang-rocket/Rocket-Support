@@ -1,0 +1,241 @@
+---
+description: >
+  supabase slow query performance, EXPLAIN ANALYZE postgres read output,
+  Seq Scan vs Index Scan postgres, supabase query performance dashboard,
+  postgres indexes B-tree GIN BRIN which to use, RLS performance overhead slow,
+  N+1 query problem supabase, pg_stat_activity monitoring queries,
+  supabase database performance debugging, missing index postgres fix,
+  work_mem statement_timeout postgres config, idle connections too many supabase,
+  postgres cost numbers EXPLAIN output, CREATE INDEX CONCURRENTLY no downtime,
+  supabase performance advisor, select auth.uid() RLS performance
+globs: ["**/*.ts", "**/*.tsx", "**/*.sql"]
+alwaysApply: false
+---
+
+# Supabase — Query Performance & Optimization Reference
+
+> First stop: Supabase Dashboard → Advisors → Performance Advisor.
+> It finds missing indexes automatically. Fix those first before manual analysis.
+
+---
+
+## Step 1 — Find Slow Queries
+
+### Supabase Dashboard (easiest)
+```
+Supabase Dashboard → Reports → Query Performance
+Shows: slowest queries by total time, average time, calls
+Click any query to see its full text and EXPLAIN plan
+```
+
+### pg_stat_statements (SQL — requires extension enabled)
+```sql
+-- Top 10 slowest queries by total time
+SELECT
+  SUBSTRING(query, 1, 80) AS query_preview,
+  calls,
+  ROUND(total_exec_time::NUMERIC, 0) AS total_ms,
+  ROUND(mean_exec_time::NUMERIC, 1)  AS avg_ms,
+  ROUND((100 * total_exec_time / SUM(total_exec_time) OVER())::NUMERIC, 1) AS pct
+FROM pg_stat_statements
+WHERE query NOT LIKE '%pg_%'
+ORDER BY total_exec_time DESC
+LIMIT 10;
+```
+
+---
+
+## Step 2 — EXPLAIN ANALYZE (read the query plan)
+
+```sql
+-- Always use EXPLAIN (ANALYZE, BUFFERS) — ANALYZE runs the query for real timing
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT * FROM orders WHERE user_id = 'abc' AND status = 'pending';
+```
+
+### Reading the output — what to look for
+
+**Seq Scan = red flag on large tables**
+```
+Seq Scan on orders  (cost=0.00..4521.00 rows=1 width=256) (actual time=0.021..48.3 rows=3 loops=1)
+  Filter: (user_id = 'abc' AND status = 'pending')
+  Rows Removed by Filter: 89997
+```
+→ Reading 90,000 rows to find 3. This table needs an index on `(user_id, status)`.
+
+**Index Scan = good**
+```
+Index Scan using orders_user_id_status_idx on orders  (cost=0.42..8.5 rows=3 width=256) (actual time=0.08..0.12 rows=3 loops=1)
+  Index Cond: (user_id = 'abc' AND status = 'pending')
+```
+→ Found 3 rows via index in 0.12ms.
+
+**Cost numbers** — `cost=start_cost..total_cost`
+- `0.00` start = no setup (good)
+- Total cost is in arbitrary units — compare relative, not absolute
+- High costs relative to similar queries indicate a problem
+
+**Actual vs estimated rows**
+```
+(cost=... rows=1000 ...) (actual ... rows=3 ...)
+```
+→ Planner estimated 1000, got 3. Statistics are stale — run `ANALYZE orders;`
+
+---
+
+## Step 3 — Add the Right Index
+
+### B-tree (default — for equality and range)
+```sql
+-- Single column (user_id equality)
+CREATE INDEX CONCURRENTLY orders_user_id_idx ON orders(user_id);
+
+-- Composite (user_id + status — covers WHERE user_id = x AND status = y)
+CREATE INDEX CONCURRENTLY orders_user_status_idx ON orders(user_id, status);
+
+-- Partial index (only index a subset — much smaller, faster)
+CREATE INDEX CONCURRENTLY active_orders_idx ON orders(user_id)
+WHERE status IN ('pending', 'processing') AND deleted_at IS NULL;
+```
+
+### GIN index (for JSONB, arrays, full-text search)
+```sql
+CREATE INDEX CONCURRENTLY products_tags_idx ON products USING gin(tags);
+CREATE INDEX CONCURRENTLY events_metadata_idx ON events USING gin(metadata);
+-- For full-text search:
+CREATE INDEX CONCURRENTLY posts_fts_idx ON posts USING gin(fts);
+```
+
+### BRIN index (for time-series / append-only tables)
+```sql
+-- Very small index, works well for timestamps on large tables
+-- Only useful if rows are inserted in time order (most event tables are)
+CREATE INDEX CONCURRENTLY events_created_at_brin ON events USING brin(created_at);
+```
+
+### CREATE INDEX CONCURRENTLY — always use this in production
+```sql
+-- Regular CREATE INDEX locks the table for writes (dangerous in production)
+-- CONCURRENTLY builds in background — table stays writable — takes longer
+CREATE INDEX CONCURRENTLY my_new_index ON orders(user_id, created_at);
+-- Takes longer (2-3x) but never causes downtime
+```
+
+### When NOT to add an index
+- Columns with very low cardinality (boolean, 2-3 possible values)
+- Tables under 1,000 rows (sequential scan is faster)
+- Write-heavy columns (every INSERT/UPDATE must update every index)
+- Already have a composite index that covers this column as the first element
+
+---
+
+## RLS Performance
+
+RLS policies run on every row — they must be fast. Slow policies degrade every query.
+
+### Common RLS performance issues
+
+**Problem: calling auth.uid() per row**
+```sql
+-- SLOW — auth.uid() called once per row evaluated
+CREATE POLICY "slow" ON orders FOR SELECT USING (user_id = auth.uid());
+
+-- FAST — auth.uid() called once, result reused
+CREATE POLICY "fast" ON orders FOR SELECT USING (
+  user_id = (SELECT auth.uid())
+);
+```
+
+**Problem: function call in policy without STABLE/IMMUTABLE**
+```sql
+-- SLOW — function re-evaluated for every row
+CREATE POLICY "slow" ON orders USING (get_user_role() = 'admin');
+
+-- FAST — mark function as STABLE so result is cached within query
+CREATE OR REPLACE FUNCTION get_user_role()
+RETURNS TEXT LANGUAGE sql STABLE AS $$
+  SELECT role FROM user_roles WHERE user_id = auth.uid();
+$$;
+```
+
+**Problem: policy without supporting index**
+```sql
+-- Every RLS policy filter needs an index on the filtered column
+-- If you have: USING (user_id = auth.uid())
+-- You MUST have: CREATE INDEX ON table(user_id);
+-- Without it — Seq Scan on every authenticated query
+```
+
+### Verify RLS is not the bottleneck
+```sql
+-- Temporarily disable RLS and run EXPLAIN — if suddenly fast, RLS is the issue
+SET row_security = off;
+EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 'abc';
+SET row_security = on;
+```
+
+---
+
+## The 3 Bottleneck Types
+
+| Bottleneck | Symptom | Fix |
+|---|---|---|
+| Missing index (I/O) | Seq Scan on large table, high "Rows Removed by Filter" | Add composite index on filtered columns |
+| Too many connections (CPU/memory) | pg_stat_activity shows many idle connections | Switch to port 6543, set `max: 1` in serverless clients |
+| RLS function overhead (CPU) | Query fast without RLS, slow with | Add `(SELECT auth.uid())` wrapper, mark functions STABLE |
+
+---
+
+## Database Configuration
+
+```sql
+-- Set statement timeout per role (prevents runaway queries)
+ALTER ROLE authenticated SET statement_timeout = '10s';
+ALTER ROLE anon SET statement_timeout = '5s';
+
+-- Increase work_mem for complex sorts/joins (default 4MB is low)
+ALTER ROLE authenticated SET work_mem = '32MB';
+
+-- Check current settings
+SHOW statement_timeout;
+SHOW work_mem;
+SHOW max_connections;
+
+-- View all custom role settings
+SELECT rolname, rolconfig FROM pg_roles WHERE rolconfig IS NOT NULL;
+```
+
+---
+
+## N+1 Query Detection and Fix
+
+N+1 = querying 1 parent, then N queries for children (one per parent row).
+
+```typescript
+// BAD — N+1 pattern
+const { data: orders } = await supabase.from('orders').select('*')
+for (const order of orders) {
+  const { data: user } = await supabase    // 1 query PER order = N+1!
+    .from('profiles').select('*').eq('id', order.user_id).single()
+}
+
+// GOOD — single join query
+const { data: orders } = await supabase
+  .from('orders')
+  .select('*, profiles(full_name, avatar_url)')  // 1 query total
+```
+
+---
+
+## Stale Statistics Fix
+
+If EXPLAIN shows huge mismatch between estimated and actual rows:
+```sql
+-- Update statistics for one table
+ANALYZE orders;
+
+-- Update all tables
+ANALYZE;
+
+-- Auto-analyze is usually on, but for large bulk imports run manually
+```

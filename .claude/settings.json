@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(echo:*)",
+      "Bash(wc:*)",
+      "Read(*)",
+      "Grep(*)",
+      "Glob(*)"
+    ],
+    "deny": [
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(npm publish:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  },
+  "model": "claude-sonnet-4-6",
+  "autoApprove": true
+}

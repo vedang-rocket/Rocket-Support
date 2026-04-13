@@ -1,0 +1,3 @@
+# Auto-promotion drafts land here.
+# Files named *.draft.md — auto-approved after 5 minutes.
+# Run: node .cursor/hooks/instinct-promoter.js --status

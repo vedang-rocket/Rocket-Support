@@ -1,0 +1,63 @@
+rules:
+  - id: supabase-js-in-server-file
+    pattern: import { createClient } from '@supabase/supabase-js'
+    paths:
+      include:
+        - "**/server.ts"
+        - "**/server.tsx"
+        - "**/route.ts"
+        - "**/route.tsx"
+        - "**/page.tsx"
+        - "**/layout.tsx"
+        - "**/actions.ts"
+        - "**/actions.tsx"
+        - "lib/supabase/**"
+        - "utils/supabase/**"
+    message: >
+      In server components, route handlers, and Server Actions: use createServerClient from @supabase/ssr,
+      not createClient from @supabase/supabase-js. The browser client doesn't handle
+      the cookie-based auth session required in server context.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: SUPABASE
+      rocket_rule: "4"
+      fix_summary: "Replace createClient(@supabase/supabase-js) with createServerClient(@supabase/ssr) in server files"
+
+  - id: supabase-new-project-anon-key-name
+    pattern-regex: "NEXT_PUBLIC_SUPABASE_ANON_KEY\\s*=\\s*eyJ.+"
+    paths:
+      include:
+        - ".env"
+        - ".env.local"
+        - ".env.production"
+    message: >
+      ROCKET NOTE: Post-Nov 2025 Supabase projects use sb_publishable_ key format, not anon_key.
+      If you created the project after November 2025, your key should start with sb_publishable_.
+      Check: Supabase Dashboard → Settings → API → Project API keys.
+    languages: [generic]
+    severity: INFO
+    metadata:
+      category: SUPABASE
+      rocket_rule: "10"
+
+  - id: supabase-missing-dynamic-export
+    patterns:
+      - pattern: |
+          const { data: { user } } = await $SUPABASE.auth.getUser()
+      - pattern-not-inside: |
+          export const dynamic = 'force-dynamic'
+          ...
+    paths:
+      include:
+        - "**/page.tsx"
+        - "**/page.ts"
+        - "**/layout.tsx"
+    message: >
+      ROCKET RULE 8: Authenticated pages must export const dynamic = 'force-dynamic'.
+      Without it Next.js may cache the page and serve stale auth state to different users.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: AUTH
+      rocket_rule: "8"

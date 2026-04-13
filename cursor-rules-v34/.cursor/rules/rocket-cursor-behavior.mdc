@@ -1,0 +1,390 @@
+---
+description: How Cursor must behave on Rocket.new Next.js projects — forbidden patterns, hard constraints, code style, behavioral rules
+globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.sql"]
+alwaysApply: true
+---
+
+# Rocket.new — Cursor Behavior Rules
+
+> CRITICAL RULES AT TOP AND BOTTOM OF THIS FILE.
+> These govern HOW Cursor operates — read before touching any code.
+
+---
+
+## PROJECT IDENTITY
+
+You are working on a **Rocket.new-generated web application** — a full-stack Next.js app with a specific, fixed tech stack. Your job is to fix bugs and implement features by writing code. Stay consistent with the conventions Rocket generates.
+
+**Fixed stack — cannot change after project creation:**
+- **Framework**: Next.js (TypeScript) App Router — OR — React (JavaScript) Vite
+- **Styling**: Tailwind CSS (`darkMode: 'class'` always)
+- **Backend**: Supabase via `@supabase/ssr` (the SSR package — NOT deprecated `auth-helpers-nextjs`)
+- **Deployment**: Netlify
+- **Payments**: Stripe (if present)
+
+---
+
+## HARD FORBIDDEN PATTERNS — NEVER VIOLATE
+
+### ❌ 1. NEVER `getSession()` in server-side code
+```typescript
+// ❌ FORBIDDEN — does not validate JWT, can be spoofed
+const { data: { session } } = await supabase.auth.getSession()
+
+// ✅ ALWAYS — validates JWT with Supabase Auth server
+const { data: { user }, error } = await supabase.auth.getUser()
+if (error || !user) redirect('/login')
+```
+
+### ❌ 1b. getClaims() in middleware, getUser() for sensitive operations
+```typescript
+// Middleware runs on EVERY request — use getClaims() (local validation, microseconds)
+const { data: claims } = await supabase.auth.getClaims()
+// claims.sub = user ID, claims.user_role = custom claim
+
+// API routes processing payments/data — use getUser() (server validation, ~100ms)
+const { data: { user } } = await supabase.auth.getUser()
+// Validates with Supabase server — catches revoked tokens
+```
+
+### ❌ 2. NEVER `request.json()` in Stripe webhook handlers
+```typescript
+// ❌ FORBIDDEN — destroys raw bytes, signature fails silently
+const body = await request.json()
+
+// ✅ ALWAYS — raw text preserves bytes for HMAC verification
+const body = await request.text()
+const event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
+```
+
+### ❌ 3. NEVER browser Supabase client in Server Components
+```typescript
+// ❌ FORBIDDEN — browser client cannot read server-side cookies
+import { createClient } from '@/lib/supabase/client'  // in a Server Component
+
+// ✅ CORRECT — server client reads cookies via next/headers
+import { createClient } from '@/lib/supabase/server'
+```
+
+### ❌ 4. NEVER `middleware.ts` inside `/app`
+```
+app/middleware.ts    ❌ — Next.js ignores this completely
+middleware.ts        ✅ — project root
+src/middleware.ts    ✅ — if using src/ directory
+```
+
+### ❌ 5. NEVER skip awaiting `cookies()` or `headers()` in Next.js 15
+```typescript
+// ❌ Next.js 14 syntax — breaks in Next.js 15
+const cookieStore = cookies()
+
+// ✅ Next.js 15
+const cookieStore = await cookies()
+const headersList = await headers()
+```
+
+### ❌ 6. NEVER expose service role key to the browser
+```typescript
+// ❌ FORBIDDEN — full database bypass exposed to anyone
+process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY
+
+// ✅ Server-only — never NEXT_PUBLIC_ prefix
+process.env.SUPABASE_SERVICE_ROLE_KEY
+```
+
+### ❌ 7. NEVER use deprecated Supabase packages
+```typescript
+// ❌ FORBIDDEN — deprecated, causes auth SSR bugs
+import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
+
+// ✅ Use @supabase/ssr
+import { createBrowserClient } from '@supabase/ssr'   // browser
+import { createServerClient } from '@supabase/ssr'    // server
+```
+
+### ❌ New projects use sb_publishable_ / sb_secret_ keys (not anon / service_role)
+```typescript
+// Projects created after November 2025 use NEW key names:
+// NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY  (was: NEXT_PUBLIC_SUPABASE_ANON_KEY)
+// SUPABASE_SECRET_KEY                   (was: SUPABASE_SERVICE_ROLE_KEY)
+// Edge Functions: SUPABASE_PUBLISHABLE_KEY (was: SUPABASE_ANON_KEY)
+
+// sb_publishable_ is NOT a JWT — never use as Authorization: Bearer token
+// supabase-js handles headers automatically — only relevant for raw fetch() calls
+
+// Safe pattern — works with BOTH legacy and new projects:
+const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+         ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+```
+When working on a project, check Dashboard → Settings → API to confirm key format.
+
+### ❌ 8. NEVER produce diffs containing `// ... existing code ...`
+```typescript
+// ❌ FORBIDDEN — this silently deletes the code it replaces
+function example() {
+  // ... existing code ...  ← THIS DELETES REAL CODE
+  newLogic()
+}
+
+// ✅ ALWAYS — show the complete file content or exact line changes
+// Never use ellipsis placeholders in diffs
+```
+**Why**: Cursor has a confirmed bug (March 2026) called "Lazy Delete" where it replaces
+large code blocks with `// ... existing code ...`. If accepted, that code is permanently deleted.
+
+
+---
+
+## MODEL ROUTING — WHICH MODEL FOR WHICH TASK
+
+| Model | Budget Tier | Use For |
+|---|---|---|
+| `cursor-small` | 💚 Cheapest | Single-line completions, variable renaming only |
+| `deepseek` | 💚 Cheapest | Simple lookups, reading files, explaining code — via OpenRouter |
+| `cursor-composer` | 💛 Standard | **DEFAULT** — all agent tasks, slash commands, multi-file fixes, plan execution |
+| `claude-sonnet` | 🟠 Premium | Complex reasoning with explanation, architectural discussion, code review |
+| `claude-opus` | 🔴 Expensive | Architecture decisions, 5+ file cross-cutting refactors, security audits |
+| `o3-mini` | 🟠 Premium | Complex TypeScript generics, algorithmic logic |
+
+**BUDGET TIERS EXPLAINED**:
+- 💚 Cheapest: Use freely — request-based billing, minimal cost
+- 💛 Standard: Default for all real work — good cost/quality ratio
+- 🟠 Premium: Use intentionally — higher cost, reserve for complex tasks
+- 🔴 Expensive: Max Mode = token-based billing — one session can cost significantly
+
+**RULE**: `cursor-composer` for 90% of tasks. Escalate deliberately, never by default.
+
+**Escalate to Opus ONLY when**:
+- Fix requires changing both auth AND payments simultaneously
+- Refactoring a file imported by 10+ files
+- Designing new database schema integrating with existing tables
+- Running /security-audit (needs deep reasoning)
+
+**⚠️ MAX MODE BILLING (March 2026)**: Claude Opus 4.6, Sonnet 4.6 now use token-based billing in Max Mode. Estimate before using: a 2K token prompt + 1K response = ~3K tokens. At scale this adds up fast. Use `cursor-composer` unless the task genuinely requires deeper reasoning.
+
+---
+
+## TECH STACK CONVENTIONS
+
+### Supabase Client — Which File to Use
+| Context | Import From |
+|---|---|
+| `'use client'` component | `@/lib/supabase/client.ts` |
+| Server Component | `@/lib/supabase/server.ts` |
+| Route Handler (`route.ts`) | `@/lib/supabase/server.ts` |
+| Server Action (`'use server'`) | `@/lib/supabase/server.ts` |
+| `middleware.ts` | `@/lib/supabase/middleware.ts` → `updateSession()` |
+
+### Next.js App Router Conventions
+- API routes: `app/api/[name]/route.ts` — exports named `GET`, `POST`, `PUT`, `DELETE`
+- Server Actions: `'use server'` directive at top of function or file
+- Dynamic routes: `app/users/[id]/page.tsx`
+- Protected routes: server-side `getUser()` + `redirect('/login')` if null — never client-side only
+- Loading states: `app/[route]/loading.tsx` — auto-shown by Next.js
+- Error boundaries: `app/[route]/error.tsx` — must be `'use client'`
+- Default to Server Components — `'use client'` only when hooks/events/browser APIs are needed
+
+### Supabase Conventions
+- RLS enabled on every table — no exceptions
+- Use `auth.uid()` in all RLS policies
+- Use `.maybeSingle()` when row may not exist, `.single()` only when guaranteed
+- Profile trigger: `on_auth_user_created` auto-creates a row in `profiles` table on signup
+- Migration SQL lives in `supabase/migrations/` folder
+- Edge Functions live in `supabase/functions/` folder
+
+---
+
+## CODE STYLE RULES
+
+### File Size — Critical for Cursor's Comprehension
+- Keep files **under 500 lines** — Cursor reads files completely up to this threshold
+- If editing a file over 500 lines: extract into smaller modules FIRST, then edit
+- Put file purpose and key imports in the **first 100 lines** — Cursor indexes the top of files
+
+### TypeScript
+- Type Supabase responses with generics: `.select<Profile>('*')`
+- Never use `any` — use `unknown` and narrow, or generate types from Supabase
+- Always null-check user data before accessing properties
+
+### Component Architecture
+- Fetch data in Server Components, pass to Client Components as props
+- Never fetch in `useEffect` when a Server Component can do it
+- Form submissions → Server Actions (not `fetch` to API routes)
+
+---
+
+## SLASH COMMANDS — WHEN TO USE EACH
+
+Commands (`.cursor/commands/*.md`) carry more weight than rules because they are injected verbatim as structured prompts. Use them intentionally for high-stakes operations.
+
+| Command | Use When |
+|---|---|
+| `/sync-rules` | Sync rules from master repo (pull latest) or push new patterns to master |
+| `/load-context` | Generate full project briefing — PRD + type detection + live DB + memory |
+| `/check-mcp` | MCP not working — diagnose connection issues, test credentials, verify tools |
+| `/audit-codebase` | **FIRST THING on every new project** — full health check via MCP + file scan |
+| `/security-audit` | Before production deploy, or when security issues suspected |
+| `/fix-performance` | N+1 queries, missing indexes, slow DB queries, useEffect fetches |
+| `/make-legible` | Messy project with no file headers — run before fixing to improve accuracy |
+| `/spec-feature` | Before building anything — locks acceptance criteria before any code |
+| `/fix-auth` | Any auth issue — session, OAuth, middleware, JWT, protected routes |
+| `/fix-database` | Supabase data empty, RLS blocking, wrong client, migration missing |
+| `/fix-stripe` | Webhook broken, payment fails, subscription not updating |
+| `/implement-feature` | Adding any new feature — forces plan-first, phase-by-phase |
+| `/debug-error` | Paste any error for chain-of-thought root cause + minimal fix |
+| `/refactor-safe` | Refactoring existing code — enforces signature preservation |
+| `/fix-deployment` | Netlify build failure or works-locally-not-prod issues |
+| `/review-diff` | Before accepting ANY agent change — 9-point security + correctness check |
+| `/plan-feature` | Complex features — generates plan.md BEFORE any code is written |
+| `/capture-convention` | After Cursor makes a mistake — formats it as a reusable rule instantly |
+| `/test-fix-loop` | Autonomous TypeScript error elimination — runs until tsc exits 0 |
+| `/handoff-report` | When returning project to user — technical + plain-English summary |
+| `/yolo-tdd` | Autonomous TDD loop — write tests first, implement, iterate until green (enable YOLO mode first) |
+| `/reflect` | Deep session learning — extracts patterns, writes to knowledge base, auto-promotes rules |
+| `/update-memory` | End of session — saves fixes/decisions to memory-bank/ |
+
+**Rule**: For any task touching 3+ files or involving auth/payments/RLS, use the relevant command rather than a plain chat prompt. Commands enforce scope-lock, chain-of-thought, and output format — plain prompts don't.
+
+---
+
+---
+
+## HOOK RUNTIME CONTROLS
+
+V20 uses 14 Node.js hooks covering all Cursor events. Control behavior:
+
+```bash
+export ECC_HOOK_PROFILE=minimal    # only safety-critical hooks
+export ECC_HOOK_PROFILE=standard   # default (recommended)
+export ECC_HOOK_PROFILE=strict     # everything including git-push review
+export ECC_DISABLED_HOOKS=pre:shell:dev-server-block  # disable specific hooks
+```
+
+---
+
+## TOKEN EFFICIENCY RULES
+
+These rules reduce cost and improve response quality simultaneously.
+
+### 1. MCP before files
+Query live database state via MCP before reading any local files.
+A schema query via MCP = ~150 tokens. Reading a migration file = ~2,000 tokens.
+
+### 2. Precise file references over @codebase
+`@specific-file.ts` over `@codebase` for known locations.
+`@codebase` triggers full semantic search — expensive. Use only for discovery.
+
+### 3. Session length awareness
+After 10 exchanges: offer /fresh-session.
+Long history = noise + cost. A fresh session with summary = better answers cheaper.
+
+### 4. Model budget discipline
+`cursor-composer` for 90% of tasks. Never escalate to Opus by default.
+Escalate only when genuinely needed — the task definition determines the model, not habit.
+
+### 5. Notepads over re-typing
+Any template you type twice → make it a Notepad.
+Reference with /use-notepad instead of re-typing every session.
+
+---
+
+## ⚠️ ISR SESSION LEAK — CRITICAL SECURITY RULE
+
+NEVER use ISR (revalidate) or route-level caching on authenticated pages or layouts.
+Supabase session cookies in cached responses can be served to different users.
+
+```typescript
+// FORBIDDEN on any page/layout that uses auth:
+export const revalidate = 60          // ❌ can serve User A's session to User B
+
+// REQUIRED on all protected pages/layouts:
+export const dynamic = 'force-dynamic' // ✅ always fresh, never cached
+```
+
+---
+
+## BEHAVIORAL RULES — HOW TO OPERATE
+
+### Rules Transparency (Reduces Hallucinations)
+At the start of every response that involves code changes, state:
+"Applying rules: [list the specific rule names relevant to this task]"
+
+Example: "Applying rules: getUser-not-getSession, file-by-file-changes, supabase-server-client"
+
+This makes it immediately visible when a rule is being ignored or forgotten.
+If you cannot name a relevant rule for a decision you're making → that's a signal
+the decision may not be grounded in the project's constraints.
+
+### Before Touching Any Code
+State:
+1. Root cause of the issue
+2. Exactly which files will be modified
+3. What will change in each
+4. What will NOT be touched
+
+### One File at a Time
+Show the complete diff for one file. Wait for confirmation before moving to the next file. Never make multi-file changes in a single step.
+
+### Minimal Scope — Never Improve What Wasn't Asked
+If asked to fix a bug in `auth.ts`, fix ONLY that bug. Do not:
+- Refactor surrounding code
+- Add unrequested error handling
+- Rename variables "for consistency"
+- Update unrelated imports
+- Add comments unless asked
+
+### File Header Requirement (Embedding Index Signal)
+
+When **creating any new file** OR making changes **>50 lines** to an existing file, add or update the file header comment block:
+
+```typescript
+/**
+ * @file [filename]
+ * @purpose [One sentence: what this file does]
+ * @exports [list of named exports, e.g. createClient, signOut, POST]
+ * @dependencies [key imports this file relies on]
+ * @do-not-modify [what should NOT be changed here, e.g. "cookie handling logic — breaks SSR auth"]
+ */
+```
+
+This is mandatory. It is not documentation — it is an **embedding index signal** that helps Cursor's semantic search find the right file and understand its role before reading it. Files without headers get misidentified and cause scope-drift edits.
+
+**Examples**: See `rocket-code-patterns.mdc` for file header examples.
+
+### History Hygiene — Context Window Management
+
+**After every 10 exchanges**, check context window usage.
+If conversation is getting long:
+- Offer: "This session is getting long. Run /fresh-session to save state and reset for sharper responses."
+- If declined: continue but note accuracy may degrade
+
+**Trigger automatically when you notice:**
+- Repeating yourself about constraints already stated
+- Earlier context seems to be influencing answers incorrectly
+- Response quality is declining from earlier in the session
+
+**The math**: A 20-turn session with verbose responses uses ~40K tokens on history.
+A /fresh-session reset with summary = ~500 tokens. That's 80x compression.
+Fresh context = better answers. This is not inconvenience. This is performance.
+
+### Chain-of-Thought for Complex Issues
+For any bug involving auth, RLS, webhooks, or async state: trace the full call chain from entry point to failure before writing a fix.
+
+### When Agent Goes Off-Rails
+Do NOT add correction prompts. Instead: revert the change, start a fresh conversation, rewrite the prompt with tighter constraints.
+
+---
+
+## ⚠️ CRITICAL RULES — REPEATED AT BOTTOM (HIGH ATTENTION ZONE)
+
+1. `getUser()` not `getSession()` — always in server code
+2. `request.text()` not `request.json()` — always in Stripe webhooks
+3. `lib/supabase/server.ts` in Server Components — `lib/supabase/client.ts` in `'use client'` only
+4. `middleware.ts` at project root — never inside `/app`
+5. `await cookies()` — required in Next.js 15, not optional
+6. Never `NEXT_PUBLIC_` on service role key
+7. Never `@supabase/auth-helpers-nextjs` — use `@supabase/ssr`
+8. Explain before applying — state changes before making them
+9. One file at a time — never multi-file sweeps
+10. Minimal scope — fix what was asked, nothing more

@@ -1,0 +1,298 @@
+---
+description: >
+  supabase CLI local development, supabase start local docker,
+  supabase db diff generate migration, supabase db push apply migration,
+  supabase db reset local, supabase gen types typescript CLI,
+  supabase migration workflow local to production, supabase init project,
+  local supabase development next.js, supabase CLI install npx,
+  supabase link project, supabase migration files, supabase db pull schema,
+  supabase functions serve local edge function, supabase status local,
+  supabase CLI commands reference, migrate schema supabase local to remote
+globs: ["**/*.ts", "**/*.tsx", "**/supabase/**", "**/.env*"]
+alwaysApply: false
+---
+
+# Supabase CLI — Local Development & Migration Workflow
+
+---
+
+## Install & Initial Setup
+
+```bash
+# Install CLI
+npm install -g supabase
+
+# Or use npx without installing globally
+npx supabase --version
+
+# Login (one-time — opens browser)
+supabase login
+```
+
+---
+
+## Project Setup (one-time per project)
+
+```bash
+# Inside your Rocket project root:
+
+# 1. Initialize Supabase config
+supabase init
+# Creates: supabase/ folder with config.toml
+
+# 2. Link to your remote Supabase project
+supabase link --project-ref [YOUR_PROJECT_REF]
+# Prompts for DB password
+# Project ref = from your Supabase URL: https://[REF].supabase.co
+```
+
+---
+
+## Local Development (Docker)
+
+```bash
+# Start local Supabase stack (requires Docker)
+supabase start
+# Starts: Postgres, PostgREST, Auth, Storage, Studio, Inbucket (local email)
+# Takes ~60 seconds first time
+
+# Shows local URLs:
+#   API URL:     http://127.0.0.1:54321
+#   Studio URL:  http://127.0.0.1:54323   (local dashboard)
+#   DB URL:      postgresql://postgres:postgres@127.0.0.1:54322/postgres
+#   Anon key:    eyJ...
+#   Service key: eyJ...
+
+# Stop
+supabase stop
+
+# Check status
+supabase status
+```
+
+```bash
+# .env.local for local development
+NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
+NEXT_PUBLIC_SUPABASE_ANON_KEY=[local anon key from supabase start output]
+SUPABASE_SERVICE_ROLE_KEY=[local service key from supabase start output]
+```
+
+---
+
+## Migration Workflow
+
+This is the correct flow: make changes locally → generate migration → test → push to remote.
+
+### Step 1 — Make schema changes in local Studio
+```
+Open: http://127.0.0.1:54323
+Use Table Editor or SQL Editor to make changes to your local DB
+```
+
+### Step 2 — Generate migration from the diff
+```bash
+# Compare local DB to migration history → generate SQL migration file
+supabase db diff -f add_orders_table
+# Creates: supabase/migrations/[timestamp]_add_orders_table.sql
+# Review this file carefully before pushing
+```
+
+### Step 3 — Test locally
+```bash
+# Reset local DB and replay all migrations from scratch
+supabase db reset
+# This is safe locally — nukes and rebuilds
+# Confirms migrations are idempotent and in correct order
+```
+
+### Step 4 — Push to remote
+```bash
+# Apply all pending migrations to remote Supabase project
+supabase db push
+# Shows which migrations will run → confirms → applies
+```
+
+### Manual migration (write SQL directly)
+```bash
+# Create empty migration file
+supabase migration new add_pgvector_index
+# Edit: supabase/migrations/[timestamp]_add_pgvector_index.sql
+
+# Then push:
+supabase db push
+```
+
+---
+
+## Type Generation
+
+Always regenerate types after any schema change.
+
+```bash
+# Generate TypeScript types from remote schema
+supabase gen types typescript --project-ref [REF] > src/types/database.types.ts
+
+# Or from local DB (while supabase start is running)
+supabase gen types typescript --local > src/types/database.types.ts
+```
+
+```typescript
+// src/types/database.types.ts is auto-generated — never edit manually
+
+// Use in your app:
+import type { Database } from '@/types/database.types'
+import { createClient } from '@/lib/supabase/server'
+
+const supabase = createClient<Database>(url, key)
+
+// All table names, column names, and types are now autocomplete + type-safe
+const { data } = await supabase
+  .from('orders')       // ← autocomplete
+  .select('id, status') // ← autocomplete
+```
+
+```json
+// package.json — add type generation script
+{
+  "scripts": {
+    "db:types": "supabase gen types typescript --project-ref [REF] > src/types/database.types.ts",
+    "db:diff": "supabase db diff",
+    "db:push": "supabase db push",
+    "db:reset": "supabase db reset"
+  }
+}
+```
+
+---
+
+## Edge Functions Local Development
+
+```bash
+# Start local Edge Function server
+supabase functions serve
+
+# Serve a specific function
+supabase functions serve my-function --env-file .env.local
+
+# Call locally
+curl -i --location --request POST 'http://localhost:54321/functions/v1/my-function' \
+  --header 'Authorization: Bearer [LOCAL_ANON_KEY]' \
+  --header 'Content-Type: application/json' \
+  --data '{"name":"World"}'
+
+# Deploy to remote
+supabase functions deploy my-function --project-ref [REF]
+```
+
+---
+
+## Using Generated Types With createClient
+
+After running `supabase gen types`, pass the Database type to createClient for full type safety.
+
+```typescript
+// src/types/database.types.ts — auto-generated, never edit manually
+// Run: npm run db:types to regenerate after every schema change
+
+// lib/supabase/client.ts
+import { createBrowserClient } from '@supabase/ssr'
+import type { Database } from '@/types/database.types'
+
+export function createClient() {
+  return createBrowserClient<Database>(  // ← pass Database type here
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+    ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
+```
+
+```typescript
+// What you get with typed client:
+const supabase = createClient()
+
+// ✅ Autocomplete on table names
+const { data } = await supabase.from('orders')  // IDE shows all table names
+
+// ✅ Autocomplete on column names
+  .select('id, status, amount_cents')           // IDE shows all columns
+
+// ✅ Type errors on wrong values
+  .eq('status', 'invalid_status')              // TypeScript error — not a valid enum value
+
+// ✅ Return type is inferred
+// data is typed as: Array<{ id: string; status: 'pending' | 'completed' | ...; amount_cents: number }>
+```
+
+### Keeping types in sync — the most missed step
+
+```bash
+# Types get stale the moment you add a column, table, or enum value
+# After every migration push → regenerate types
+
+# Good workflow:
+supabase db push                    # 1. push migration to remote
+npm run db:types                    # 2. regenerate types immediately
+git add src/types/database.types.ts # 3. commit the updated types
+```
+
+```json
+// package.json — keep this script in sync
+{
+  "scripts": {
+    "db:types": "supabase gen types typescript --project-ref [YOUR_REF] > src/types/database.types.ts"
+  }
+}
+```
+
+**Common mistake**: pushing a migration that adds a column, then calling `.select('new_column')` — TypeScript says it's an error because types are stale. Fix: regenerate types.
+
+---
+
+## Pull Remote Schema (for existing projects)
+
+```bash
+# If you started without CLI and want to pull current remote schema
+supabase db pull
+# Creates migration files representing current remote state
+# Use this when starting CLI usage on an existing project
+```
+
+---
+
+## Seed Data
+
+```bash
+# Create seed file
+# supabase/seed.sql — runs after db reset
+
+# Example seed.sql:
+INSERT INTO public.profiles (id, full_name, email)
+VALUES
+  ('00000000-0000-0000-0000-000000000001', 'Test User', 'test@example.com'),
+  ('00000000-0000-0000-0000-000000000002', 'Admin User', 'admin@example.com');
+
+INSERT INTO public.user_roles (user_id, role)
+VALUES
+  ('00000000-0000-0000-0000-000000000001', 'member'),
+  ('00000000-0000-0000-0000-000000000002', 'admin');
+```
+
+```bash
+# Reset + apply seed
+supabase db reset
+# Runs all migrations then supabase/seed.sql
+```
+
+---
+
+## Common CLI Errors
+
+| Error | Fix |
+|---|---|
+| `supabase start` fails | Docker not running — start Docker Desktop first |
+| `supabase link` — wrong password | Use DB password from Dashboard → Settings → Database |
+| `db diff` shows nothing | Local DB matches migration history — make changes in local Studio first |
+| `db push` conflict | Remote has changes not in migration files — run `db pull` first |
+| Port 54321 already in use | Another supabase project is running — `supabase stop` first |
+| Types out of date | Run `npm run db:types` after every migration push |

@@ -1,0 +1,277 @@
+---
+description: >
+  vercel AI SDK useChat useCompletion nextjs, streamText streamObject AI SDK,
+  ai npm package nextjs supabase, streaming AI response nextjs vercel AI,
+  useChat hook nextjs AI chatbot, LLM streaming nextjs app router,
+  structured output zod LLM validation, AI SDK tool calling nextjs,
+  LLM observability langfuse braintrust, RAG evaluation nextjs supabase,
+  prompt engineering system prompts, AI cost tracking per request,
+  streamText supabase edge function, useObject hook structured AI output,
+  AI SDK providers openai anthropic, abort signal streaming cancel AI
+globs: ["**/*.ts", "**/*.tsx", "**/supabase/functions/**"]
+alwaysApply: false
+---
+
+# AI Streaming, Evaluation & Observability Reference
+
+---
+
+## Vercel AI SDK — The Standard for Streaming in Next.js
+
+```bash
+npm install ai @ai-sdk/openai
+```
+
+### Server: streamText (replaces manual SSE)
+```typescript
+// app/api/chat/route.ts
+import { streamText } from 'ai'
+import { openai } from '@ai-sdk/openai'
+import { createClient } from '@/lib/supabase/server'
+
+export async function POST(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { messages } = await request.json()
+
+  const result = streamText({
+    model: openai('gpt-4o-mini'),
+    system: 'You are a helpful assistant for a SaaS application.',
+    messages,
+    maxTokens: 1000,
+    onFinish: async ({ usage, text }) => {
+      // Track usage after stream completes
+      await supabase.from('ai_usage').insert({
+        user_id: user.id,
+        model: 'gpt-4o-mini',
+        prompt_tokens: usage.promptTokens,
+        completion_tokens: usage.completionTokens,
+        estimated_cost_usd: (usage.promptTokens * 0.00015 + usage.completionTokens * 0.0006) / 1000,
+      })
+    },
+  })
+
+  return result.toDataStreamResponse()
+}
+```
+
+### Client: useChat hook
+```typescript
+// components/ChatInterface.tsx
+'use client'
+import { useChat } from 'ai/react'
+
+export function ChatInterface() {
+  const { messages, input, handleInputChange, handleSubmit, isLoading, stop, error } = useChat({
+    api: '/api/chat',
+    onError: (error) => console.error('Chat error:', error),
+    onFinish: (message) => console.log('Stream complete:', message),
+  })
+
+  return (
+    <div>
+      {messages.map(m => (
+        <div key={m.id} style={{ background: m.role === 'user' ? '#f0f0f0' : 'white' }}>
+          <strong>{m.role}:</strong> {m.content}
+        </div>
+      ))}
+
+      {error && <p style={{ color: 'red' }}>Error: {error.message}</p>}
+
+      <form onSubmit={handleSubmit}>
+        <input value={input} onChange={handleInputChange} placeholder="Ask something..." />
+        {isLoading
+          ? <button type="button" onClick={stop}>Stop</button>
+          : <button type="submit">Send</button>
+        }
+      </form>
+    </div>
+  )
+}
+```
+
+---
+
+## Structured Output — Zod Validation
+
+```typescript
+// app/api/extract/route.ts — extract structured data from unstructured text
+import { generateObject } from 'ai'
+import { openai } from '@ai-sdk/openai'
+import { z } from 'zod'
+
+const OrderSchema = z.object({
+  items: z.array(z.object({
+    product: z.string(),
+    quantity: z.number().positive(),
+    price: z.number().positive(),
+  })),
+  total: z.number().positive(),
+  currency: z.enum(['USD', 'EUR', 'GBP']),
+})
+
+export async function POST(request: Request) {
+  const { emailText } = await request.json()
+
+  const { object: order } = await generateObject({
+    model: openai('gpt-4o-mini'),
+    schema: OrderSchema,
+    prompt: `Extract the order details from this email: ${emailText}`,
+  })
+
+  // order is fully typed as { items: [...], total: number, currency: 'USD' | 'EUR' | 'GBP' }
+  return Response.json({ order })
+}
+```
+
+```typescript
+// useObject hook — stream structured data to the client
+'use client'
+import { experimental_useObject as useObject } from 'ai/react'
+import { z } from 'zod'
+
+const ProfileSchema = z.object({
+  name: z.string(),
+  skills: z.array(z.string()),
+  summary: z.string(),
+})
+
+export function ProfileExtractor() {
+  const { object, submit, isLoading } = useObject({
+    api: '/api/extract-profile',
+    schema: ProfileSchema,
+  })
+
+  return (
+    <div>
+      <button onClick={() => submit({ resumeText: '...' })}>Extract Profile</button>
+      {/* object streams in incrementally — partial values as they arrive */}
+      {object?.name && <p>Name: {object.name}</p>}
+      {object?.skills && <p>Skills: {object.skills.join(', ')}</p>}
+    </div>
+  )
+}
+```
+
+---
+
+## LLM Observability with Langfuse
+
+```bash
+npm install langfuse
+```
+
+```typescript
+// lib/langfuse.ts
+import Langfuse from 'langfuse'
+
+export const langfuse = new Langfuse({
+  secretKey: process.env.LANGFUSE_SECRET_KEY!,
+  publicKey: process.env.NEXT_PUBLIC_LANGFUSE_PUBLIC_KEY!,
+  baseUrl: 'https://cloud.langfuse.com',
+})
+```
+
+```typescript
+// app/api/chat/route.ts — trace RAG calls
+import { langfuse } from '@/lib/langfuse'
+import { streamText } from 'ai'
+
+export async function POST(request: Request) {
+  const { messages, userId } = await request.json()
+  const trace = langfuse.trace({ name: 'rag-chat', userId })
+
+  // Track retrieval
+  const retrievalSpan = trace.span({ name: 'vector-retrieval' })
+  const context = await retrieveContext(supabase, messages.at(-1).content)
+  retrievalSpan.end({ output: { chunksRetrieved: context?.length ?? 0 } })
+
+  // Track generation
+  const genSpan = trace.generation({
+    name: 'openai-stream',
+    model: 'gpt-4o-mini',
+    input: messages,
+  })
+
+  const result = streamText({
+    model: openai('gpt-4o-mini'),
+    messages,
+    onFinish: ({ usage }) => {
+      genSpan.end({ usage: { input: usage.promptTokens, output: usage.completionTokens } })
+      langfuse.flushAsync()   // flush before response ends
+    },
+  })
+
+  return result.toDataStreamResponse()
+}
+```
+
+---
+
+## RAG Evaluation — Did Your Answer Work?
+
+```typescript
+// lib/rag-eval.ts — simple faithfulness check
+export async function evaluateRAGAnswer(params: {
+  question: string
+  context: string
+  answer: string
+  userId: string
+}) {
+  // Check if answer is grounded in the context (hallucination detection)
+  const { object } = await generateObject({
+    model: openai('gpt-4o-mini'),
+    schema: z.object({
+      faithful: z.boolean(),
+      confidence: z.number().min(0).max(1),
+      unsupported_claims: z.array(z.string()),
+    }),
+    prompt: `
+Given this context: ${params.context}
+And this answer: ${params.answer}
+Is the answer faithful to the context? List any unsupported claims.
+    `.trim(),
+  })
+
+  // Log evaluation result
+  await supabase.from('rag_evaluations').insert({
+    user_id: params.userId,
+    question: params.question,
+    faithful: object.faithful,
+    confidence: object.confidence,
+    unsupported_claims: object.unsupported_claims,
+    created_at: new Date().toISOString(),
+  })
+
+  return object
+}
+```
+
+---
+
+## Prompt Engineering Patterns
+
+```typescript
+// lib/prompts.ts — versioned system prompts
+export const SYSTEM_PROMPTS = {
+  rag_v1: `You are a helpful assistant. Answer questions based ONLY on the provided context.
+If the context doesn't contain enough information, say so clearly.
+Never make up information not in the context.
+Keep answers concise and direct.`,
+
+  rag_v2: `You are a helpful assistant for [App Name].
+Rules:
+- Answer based on the provided context only
+- If unsure, say "I don't have information about that"
+- Use bullet points for lists of 3+ items
+- Keep responses under 200 words unless the question requires more`,
+}
+
+// Temperature guide:
+// 0.0 — deterministic: structured extraction, classification, code generation
+// 0.3 — mostly deterministic: factual Q&A, data analysis
+// 0.7 — balanced: conversational AI, writing assistance
+// 1.0+ — creative: brainstorming, creative writing
+```

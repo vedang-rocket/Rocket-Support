@@ -1,0 +1,15 @@
+rules:
+  - id: supabase-getsession-not-getuser
+    pattern: $CLIENT.auth.getSession()
+    fix: $CLIENT.auth.getUser()
+    message: >
+      ROCKET RULE 1: Use getUser() not getSession() in server code.
+      getSession() reads the cookie but does NOT validate the JWT against Supabase Auth server.
+      An attacker can craft a valid-looking but expired/revoked token.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: AUTH
+      rocket_rule: "1"
+      cwe: "CWE-287"
+      fix_summary: "Replace .auth.getSession() with .auth.getUser()"

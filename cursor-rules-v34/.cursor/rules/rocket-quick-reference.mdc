@@ -1,0 +1,210 @@
+---
+description: Rocket.new developer quick reference — critical code rules, key file locations, environment variables, diagnostic commands, Supabase and Stripe checklists
+globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.sql"]
+alwaysApply: true
+---
+
+# Rocket.new — Developer Quick Reference
+
+> ⚠️ CRITICAL RULES AT THE VERY TOP AND REPEATED AT THE BOTTOM.
+> These are the patterns that cause the most bugs in Rocket projects.
+
+---
+
+## 🚨 THE 7 RULES THAT CAUSE 90% OF BUGS
+
+```typescript
+// ❌→✅  1. SERVER CODE: getUser() not getSession()
+const { data: { user } } = await supabase.auth.getUser()  // ✅
+const { data: { session } } = await supabase.auth.getSession()  // ❌ server-side
+
+// ❌→✅  2. STRIPE WEBHOOKS: request.text() not request.json()
+const body = await request.text()   // ✅ raw — required for signature
+const body = await request.json()   // ❌ destroys raw bytes
+
+// ❌→✅  3. SERVER COMPONENTS: use server client, not browser client
+import { createClient } from '@/lib/supabase/server'  // ✅
+import { createClient } from '@/lib/supabase/client'  // ❌ in Server Component
+
+// ❌→✅  4. MIDDLEWARE LOCATION: root level, not inside /app
+// middleware.ts   ✅   |   app/middleware.ts  ❌
+
+// ❌→✅  5. NEXT.JS 15: await cookies()
+const cookieStore = await cookies()  // ✅
+const cookieStore = cookies()        // ❌ breaks in Next.js 15
+
+// ❌→✅  6. SERVICE ROLE KEY: server only, never NEXT_PUBLIC_
+process.env.SUPABASE_SERVICE_ROLE_KEY         // ✅
+process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE  // ❌ exposed to browser
+
+// ❌→✅  7. SUPABASE PACKAGE: @supabase/ssr, not deprecated auth-helpers
+import { createServerClient } from '@supabase/ssr'  // ✅
+import { createServerComponentClient } from '@supabase/auth-helpers-nextjs'  // ❌
+```
+
+---
+
+## ⚙️ TECH STACK (Fixed)
+
+| Layer | Technology |
+|---|---|
+| Framework | **Next.js** (TypeScript) App Router — OR — **React** (JavaScript) Vite |
+| Styling | **Tailwind CSS** (`darkMode: 'class'`) |
+| Backend | **Supabase** via `@supabase/ssr` |
+| Deployment | **Netlify** |
+
+---
+
+## 📁 KEY FILES — WHAT LIVES WHERE
+
+| File | Purpose | Breaks When |
+|---|---|---|
+| `middleware.ts` | Root level — calls `updateSession()` | Missing or in `/app` → auth fails after token expiry |
+| `lib/supabase/client.ts` | Browser Supabase — `'use client'` ONLY | Used in Server Component → cookie errors |
+| `lib/supabase/server.ts` | Server Supabase — Server Components, Route Handlers | `getSession()` used → insecure auth |
+| `lib/supabase/middleware.ts` | `updateSession()` function | Not called in middleware → sessions stale |
+| `app/auth/callback/route.ts` | OAuth + magic link exchange | Missing → all OAuth fails |
+| `app/api/webhooks/stripe/route.ts` | Stripe events | `request.json()` used → signature fails |
+| `supabase/migrations/` | SQL migration files | Not pushed → tables don't exist |
+| `.env.local` | Local env vars | Not copied to Netlify → prod broken |
+
+---
+
+## 🌍 ENVIRONMENT VARIABLES
+
+```bash
+# .env.local                                    Netlify (add manually — not auto-synced)
+NEXT_PUBLIC_SUPABASE_URL              →         add
+NEXT_PUBLIC_SUPABASE_ANON_KEY         →         add
+SUPABASE_SERVICE_ROLE_KEY             →         add  (server only)
+STRIPE_SECRET_KEY                     →         use sk_live_ in prod
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY    →         use pk_live_ in prod
+STRIPE_WEBHOOK_SECRET                 →         unique per endpoint AND env
+STRIPE_PRICE_ID                       →         RECREATE in live mode
+NEXT_PUBLIC_SITE_URL                  →         https://your-app.netlify.app
+RESEND_API_KEY                        →         add (if email enabled)
+```
+
+---
+
+## ⚡ SLASH COMMANDS — TYPE / TO TRIGGER
+
+| Command | When to use |
+|---|---|
+| `/audit-codebase` | **FIRST on every new project** — full health check before touching anything |
+| `/security-audit` | Full security sweep — before production or when issues suspected |
+| `/make-legible` | Add file headers to messy project — improves all subsequent fixes |
+| `/spec-feature` | Lock acceptance criteria BEFORE any planning or code |
+| `/fix-auth` | Auth broken, can't login, session lost, OAuth fails, JWT errors |
+| `/fix-database` | Data not loading, empty `[]`, RLS blocking, migrations missing |
+| `/fix-stripe` | Webhook broken, payment fails, subscription not updating |
+| `/implement-feature` | Adding any new feature — plan first, then phase-by-phase |
+| `/debug-error` | Paste any error → chain-of-thought root cause + minimal fix |
+| `/refactor-safe` | Refactor with explicit scope-lock — zero breaking changes |
+| `/fix-deployment` | Netlify build fails, works locally not in production |
+| `/review-diff` | 9-point security + correctness check before accepting changes |
+| `/plan-feature` | Complex features — generates plan.md before any code |
+| `/capture-convention` | Cursor made a mistake — format it as a rule instantly |
+| `/test-fix-loop` | Autonomous TypeScript error elimination — runs until tsc exits 0 |
+| `/instinct-status` | View learned instincts with confidence scores |
+| `/instinct-export` | Export instincts to share with teammates |
+| `/instinct-import` | Import instincts from a file |
+| `/evolve` | Cluster instincts into a formal skill |
+| `/learn-eval` | Quality-gated session learning extraction |
+| `/harness-audit` | Audit the entire config system health |
+| `/quality-gate` | Full codebase quality check |
+| `/model-route` | Route a task to the optimal model |
+| `/docs` | Search Rocket/Supabase/Next.js documentation |
+| `/update-memory` | End of session — saves fixes/decisions to memory-bank/ |
+
+**New project order**: `/audit-codebase` → `/make-legible` → fix commands
+
+---
+
+## 🩺 FIRST 5 DIAGNOSTIC COMMANDS (Run on Any Broken Project)
+
+```bash
+# 1. TypeScript errors — catches 60% of build failures
+npx tsc --noEmit
+
+# 2. Find getSession() in server code (broken auth)
+grep -rn "getSession()" ./app ./lib ./middleware.ts
+
+# 3. Verify env vars load
+node -e "require('dotenv').config({path:'.env.local'}); console.log('URL:', !!process.env.NEXT_PUBLIC_SUPABASE_URL)"
+
+# 4. Find deprecated Supabase package usage
+grep -rn "auth-helpers-nextjs" ./app ./lib ./package.json
+
+# 5. Clear Next.js cache (fixes ~20% of weird issues)
+rm -rf .next && npm run dev
+```
+
+---
+
+## 📊 SUPABASE CHECKLIST
+
+```
+□ Project active? (free tier pauses after 7 days — restore at supabase.com)
+□ Migrations pushed? (supabase/migrations/ SQL applied to Supabase)
+□ Profile trigger exists?
+  SELECT * FROM pg_trigger WHERE tgname = 'on_auth_user_created';
+□ RLS policies on all tables?
+  SELECT * FROM pg_policies WHERE tablename = 'your_table';
+□ Redirect URLs: localhost + Netlify prod URL + custom domain?
+□ Social OAuth: only works on live URL — NEVER on localhost
+□ Env vars in both .env.local AND Netlify dashboard?
+```
+
+---
+
+## 💳 STRIPE GO-LIVE CHECKLIST
+
+```
+□ Recreate ALL products/prices in LIVE mode (don't transfer from test)
+□ STRIPE_SECRET_KEY → sk_live_...
+□ NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY → pk_live_...
+□ Create new webhook endpoint with production URL
+□ STRIPE_WEBHOOK_SECRET → live endpoint's secret (different from test!)
+□ STRIPE_PRICE_ID → live mode price ID
+□ Update ALL 4 Stripe vars in Netlify environment variables
+□ Trigger fresh Netlify deploy after env var changes
+```
+
+---
+
+## 🗂️ FILE INDEX (compact)
+
+**Always-on (2)**: `rocket-cursor-behavior` · `rocket-quick-reference`
+
+**Auto-load (59)**: architecture · autonomous-qa · billing · code-patterns-core · code-patterns-payments · commands · debugging-protocol · error-fixes-nextjs · error-fixes-stripe-deploy · feature-playbooks-core · feature-playbooks-advanced · first-open · integrations · mcp · memory-bank · notepads · overview · parallel-workflow · project-types · prompting · recipes · self-improvement · subagents · supabase · tech-stack
+
+**Commands (34)**: `/sync-rules` · `/load-context` · `/check-mcp` · `/audit-codebase` · `/security-audit` · `/fix-performance` · `/make-legible` · `/spec-feature` · `/fix-auth` · `/fix-database` · `/fix-stripe` · `/implement-feature` · `/yolo-tdd` · `/debug-error` · `/refactor-safe` · `/fix-deployment` · `/review-diff` · `/plan-feature` · `/capture-convention` · `/test-fix-loop` · `/handoff-report` · `/reflect` · `/learn-eval` · `/fresh-session` · `/use-notepad` · `/update-memory` · `/instinct-status` · `/instinct-export` · `/instinct-import` · `/evolve` · `/harness-audit` · `/quality-gate` · `/model-route` · `/docs`
+
+**Skills (14)**: `fix-auth-flow` · `fix-supabase-rls` · `implement-feature` · `fix-stripe` · `fix-deployment` · `fix-env-variables` · `iterative-retrieval` · `search-first` · `skill-stocktake` · `implement-pgvector` · `implement-mfa` · `implement-scheduled-jobs` · `fix-database-performance` · `implement-rbac`
+
+**Agents (7)**: `code-reviewer` · `planner` · `database-reviewer` · `security-reviewer` · `build-error-resolver` · `loop-operator` · `harness-optimizer`
+
+**Instincts**: `memory-bank/instincts/` — grows with every project
+
+---
+
+## ⚠️ CRITICAL RULES — REPEATED AT BOTTOM (HIGH ATTENTION ZONE)
+
+1. **`getUser()` not `getSession()`** — always in server-side code
+2. **`request.text()` not `request.json()`** — always in Stripe webhook handlers
+3. **`lib/supabase/server.ts`** in Server Components — **`lib/supabase/client.ts`** in `'use client'` only
+4. **`middleware.ts` at project root** — never inside `/app`
+5. **`await cookies()`** — required in Next.js 15
+6. **Never `NEXT_PUBLIC_`** on service role key
+7. **Never `@supabase/auth-helpers-nextjs`** — use `@supabase/ssr`
+8. **Social OAuth never works on localhost** — test on deployed URL only
+9. **`.env.local` is NOT auto-synced** to Netlify — add vars manually
+10. **Stripe test/live are fully isolated** — recreate everything in live mode
+11. **`/audit-codebase` first** on every new project — never skip
+12. **`cursor-composer` for agent tasks** — not Sonnet, not Opus
+13. **Identify project type** before auditing — SaaS/e-commerce/AI/booking all have different failure modes
+14. **Run `/check-mcp`** if MCP tools don't appear — they fail silently
+15. **Env file is `.env`** in Rocket projects — not `.env.local` — both work, don't rename
+16. **MCP credentials in mcp.json** — paste directly per project, they don't auto-read from `.env`
+17. **`memory-bank/instincts/`** — read at session start, write via `/reflect` or `/learn-eval`
