@@ -344,6 +344,43 @@ done
 section 6 "MCP servers — queued for merge after RuFlo"
 ok "Context7 + Sequential Thinking + Memory + Playwright queued"
 
+# Write MCP config to .cursor/mcp.json for Cursor IDE
+mkdir -p "$PROJECT_DIR/.cursor"
+python3 - << PYEOF
+import json, os
+
+cursor_mcp = "$PROJECT_DIR/.cursor/mcp.json"
+
+servers = {
+    "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+    "sequential-thinking": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]},
+    "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+    "playwright": {"command": "npx", "args": ["@playwright/mcp@latest"]}
+}
+
+existing = {}
+if os.path.exists(cursor_mcp):
+    try:
+        with open(cursor_mcp) as f:
+            existing = json.load(f)
+    except Exception:
+        existing = {}
+
+if "mcpServers" not in existing:
+    existing["mcpServers"] = {}
+
+added = [k for k in servers if k not in existing["mcpServers"]]
+existing["mcpServers"].update({k: v for k, v in servers.items() if k not in existing["mcpServers"]})
+
+with open(cursor_mcp, "w") as f:
+    json.dump(existing, f, indent=2)
+
+if added:
+    print(f"  \033[0;32m✓\033[0m MCP → .cursor/mcp.json ({', '.join(added)})")
+else:
+    print("  \033[0;32m✓\033[0m MCP → .cursor/mcp.json (already present)")
+PYEOF
+
 # ── 7. Detect project + generate CLAUDE.md ───────────────────
 section 7 "Generate project-specific CLAUDE.md"
 cd "$PROJECT_DIR"
