@@ -1,13 +1,39 @@
-# Python cache
+# Python
 engine/.venv/
 engine/__pycache__/
 engine/kb/__pycache__/
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Generated/runtime files
-logs/
+# Virtual envs
+.venv-codegen/
+
+# Runtime databases
+ruvector.db
+ruvector.db-shm
+ruvector.db-wal
+
+# Workspaces (client project folders, never commit these)
+workspace/
+
+# RuFlo / swarm runtime state
+.swarm/
+.claude-flow/
+
+# KB build artifacts
+engine/kb/kb_index.pkl
 kb/kb_index.pkl
-.DS_Store
 
-# Sensitive
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Secrets / local state
 .rocket-support/
+.claude/settings.local.json
+
+# Logs
+logs/
+*.log

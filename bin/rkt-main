@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  rkt-main — Rocket.new Full Project Setup
-#  Usage: rkt-main <project-name> [--force] [--no-diagnose]
+#  Usage: rkt-main <project-name> [--force] [--no-diagnose] [--yes|--preview-only|--non-interactive]
 # ============================================================
 
 RKT_HOME="${RKT_HOME:-$HOME/rocket-support}"
@@ -32,6 +32,20 @@ warn()    { echo -e "  ${YELLOW}⚠${NC} $1"; }
 fail()    { echo -e "\n  ${RED}✗ ERROR:${NC} $1\n"; exit 1; }
 skip()    { echo -e "  ${YELLOW}–${NC} $1 (skipped)"; }
 section() { echo -e "\n${BOLD}${CYAN}[$1/$TOTAL_STEPS] $2${NC}"; }
+
+validate_git_repo() {
+  local repo_dir="$1"
+  local context="$2"
+  if [[ ! -d "$repo_dir/.git" ]]; then
+    fail "$context: missing .git directory at $repo_dir"
+  fi
+  if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    fail "$context: invalid git worktree at $repo_dir"
+  fi
+  if ! git -C "$repo_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+    fail "$context: repository has no valid HEAD commit (clone/pull likely failed)"
+  fi
+}
 
 
 # ── Global one-time MCP setup (runs silently, skips if already done) ─
@@ -81,11 +95,14 @@ setup_global_mcp
 
 if [[ $# -eq 0 ]]; then
   echo -e "\n${BOLD}rkt-main${NC} — Full Rocket.new project setup"
-  echo -e "Usage:   rkt-main <project-name> [--force] [--no-diagnose]"
+  echo -e "Usage:   rkt-main <project-name> [--force] [--no-diagnose] [--yes|--preview-only|--non-interactive]"
   echo -e "         rkt-main --local /path/to/project   → use local folder, skip clone"
   echo -e "         rkt-main /path/to/project           → shorthand for --local"
-  echo -e "         --force        Redo all 11 steps even if project already exists"
-  echo -e "         --no-diagnose  Skip Claude diagnosis (fast scan only)"
+  echo -e "         --force           Redo all 11 steps even if project already exists"
+  echo -e "         --no-diagnose     Skip Claude diagnosis (fast scan only)"
+  echo -e "         --yes             Auto-apply all write-capable fixes"
+  echo -e "         --preview-only    Show diffs only; write no files"
+  echo -e "         --non-interactive Disable prompts; requires --yes or --preview-only"
   echo -e "Example: rkt-main cliently                  → clone from GitHub + full setup"
   echo -e "         rkt-main --local ~/Downloads/myproject → local folder + full setup"
   echo -e "         rkt-main /path/to/project          → shorthand for --local"
@@ -99,10 +116,14 @@ RUN_DIAGNOSE=true
 RUN_FORCE=false
 RUN_LOCAL=false
 LOCAL_PATH=""
+SMART_ARGS=()
 for _arg in "${@:2}"; do
   [[ "$_arg" == "--no-diagnose" ]] && RUN_DIAGNOSE=false
   [[ "$_arg" == "--force" ]]       && RUN_FORCE=true
   [[ "$_arg" == "--local" ]]       && RUN_LOCAL=true
+  [[ "$_arg" == "--yes" ]] && SMART_ARGS+=("--yes")
+  [[ "$_arg" == "--preview-only" ]] && SMART_ARGS+=("--preview-only")
+  [[ "$_arg" == "--non-interactive" ]] && SMART_ARGS+=("--non-interactive")
 done
 # If first arg is a path (starts with / or ~), treat as --local
 if [[ "$1" == /* || "$1" == ~* ]]; then
@@ -153,6 +174,7 @@ if $_is_setup && ! $RUN_FORCE; then
 
   # Jump straight to engine block — reuse FP_JSON vars needed later
   FP_JSON=""; FP_TYPE="Unknown"; FP_CONFIDENCE="?"; FP_FAILURE="Unknown"
+  FP_USED_FALLBACK="false"; FP_FALLBACK_REASON=""
   FP_CATEGORY="OTHER"; FP_FRAMEWORK="Next.js"; FP_NEXT_VERSION="unknown"
   FP_HAS_SUPABASE="false"; FP_HAS_STRIPE="false"; FP_SQL_FILES=0
 
@@ -166,6 +188,8 @@ if $_is_setup && ! $RUN_FORCE; then
       FP_TYPE=$(echo "$FP_JSON"        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('project_type','Unknown'))")
       FP_CONFIDENCE=$(echo "$FP_JSON"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"{d.get('confidence',0):.0%}\")")
       FP_FAILURE=$(echo "$FP_JSON"     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('common_failure',''))")
+      FP_USED_FALLBACK=$(echo "$FP_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('used_fallback', False)).lower())")
+      FP_FALLBACK_REASON=$(echo "$FP_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('fallback_reason',''))")
     fi
 
     echo -e "\n  ${BLUE}▸${NC} Running Semgrep autofix scan..."
@@ -205,9 +229,14 @@ if $_is_setup && ! $RUN_FORCE; then
   echo ""
 
   if $RUN_DIAGNOSE; then
-    echo -e "  ${BOLD}${CYAN}Running full Claude diagnosis...${NC}"
+    echo -e "  ${BOLD}${CYAN}Running full deterministic diagnosis + fix pipeline...${NC}"
     echo ""
-    rkt --local "$PROJECT_DIR"
+    if [[ -x "$ENGINE_VENV" && -f "$ENGINE_SMART" ]]; then
+      "$ENGINE_VENV" "$ENGINE_SMART" "$PROJECT_DIR" "${SMART_ARGS[@]}"
+    else
+      warn "rkt_smart unavailable in engine venv — falling back to rkt --local"
+      rkt --local "$PROJECT_DIR"
+    fi
   fi
   exit 0
 fi
@@ -220,15 +249,17 @@ else
   mkdir -p "$ROCKET_DIR"
   if [[ -d "$PROJECT_DIR/.git" ]]; then
     info "Already cloned — pulling latest..."
-    git -C "$PROJECT_DIR" pull --quiet 2>/dev/null && ok "Pulled latest" || warn "Pull failed — using existing code"
+    git -C "$PROJECT_DIR" pull --quiet 2>/dev/null && ok "Pulled latest" || warn "Pull failed — validating current checkout"
+    validate_git_repo "$PROJECT_DIR" "git pull check"
   else
     info "Cloning $PROJECT..."
     git clone --quiet "$REPO_URL" "$PROJECT_DIR" || fail "Clone failed. Check name and SSH key."
     ok "Cloned → $PROJECT_DIR"
+    validate_git_repo "$PROJECT_DIR" "git clone check"
   fi
 
   # Fetch latest remote refs
-  git -C "$PROJECT_DIR" fetch --all --quiet 2>/dev/null || true
+  git -C "$PROJECT_DIR" fetch --all --quiet 2>/dev/null || fail "git fetch failed for $PROJECT_DIR"
 
   # Get most recently updated remote branch
   LATEST_BRANCH=$(git -C "$PROJECT_DIR" branch -r \
@@ -241,8 +272,9 @@ else
   fi
 
   # Checkout and pull
-  git -C "$PROJECT_DIR" checkout "$LATEST_BRANCH" --quiet 2>/dev/null || true
-  git -C "$PROJECT_DIR" pull --quiet origin "$LATEST_BRANCH" 2>/dev/null || true
+  git -C "$PROJECT_DIR" checkout "$LATEST_BRANCH" --quiet 2>/dev/null || fail "git checkout $LATEST_BRANCH failed"
+  git -C "$PROJECT_DIR" pull --quiet origin "$LATEST_BRANCH" 2>/dev/null || fail "git pull origin $LATEST_BRANCH failed"
+  validate_git_repo "$PROJECT_DIR" "post-checkout validation"
 
   # Show current state
   CURRENT_BRANCH=$(git -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
@@ -387,6 +419,7 @@ cd "$PROJECT_DIR"
 
 # ── 7a. Run fingerprinter (engine) or fall back to bash heuristics ──
 FP_TYPE="Unknown"; FP_CONFIDENCE="?"; FP_FAILURE="Unknown"
+FP_USED_FALLBACK="false"; FP_FALLBACK_REASON=""
 FP_CATEGORY="OTHER"; FP_FRAMEWORK="Next.js"; FP_NEXT_VERSION="unknown"
 FP_HAS_SUPABASE="false"; FP_HAS_STRIPE="false"
 FP_ENV_BLOCK=""; FP_SCORES_BLOCK=""; FP_SQL_FILES=0
@@ -400,6 +433,8 @@ if $ENGINE_AVAILABLE; then
     FP_TYPE=$(echo "$FP_JSON"        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('project_type','Unknown'))")
     FP_CONFIDENCE=$(echo "$FP_JSON"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"{d.get('confidence',0):.0%}\")")
     FP_FAILURE=$(echo "$FP_JSON"     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('common_failure',''))")
+    FP_USED_FALLBACK=$(echo "$FP_JSON"| python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('used_fallback', False)).lower())")
+    FP_FALLBACK_REASON=$(echo "$FP_JSON"| python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('fallback_reason',''))")
     FP_CATEGORY=$(echo "$FP_JSON"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('category','OTHER'))")
     FP_FRAMEWORK=$(echo "$FP_JSON"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('framework','Next.js'))")
     FP_NEXT_VERSION=$(echo "$FP_JSON"| python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('next_version','') or 'unknown')")
@@ -421,7 +456,11 @@ for t,s in items:
     bar = '█' * int(s*20)
     print(f'  {t:<12} {s:.3f} {bar}')
 ")
-    ok "Fingerprinted: $FP_TYPE ($FP_CONFIDENCE confidence) — most likely: $FP_FAILURE"
+    if [[ "$FP_USED_FALLBACK" == "true" ]]; then
+      warn "Fingerprinted with heuristic fallback: $FP_TYPE ($FP_CONFIDENCE confidence) — $FP_FALLBACK_REASON"
+    else
+      ok "Fingerprinted: $FP_TYPE ($FP_CONFIDENCE confidence) — most likely: $FP_FAILURE"
+    fi
   else
     warn "Fingerprinter returned no output — falling back to bash heuristics"
   fi
@@ -662,6 +701,39 @@ FEATEOF
 ok "Obsidian vault → $VAULT_DIR"
 ok "Folders: Architecture/ Features/ Bugs/ Decisions/ Daily/"
 
+# Register vault in ~/.claude/obsidian/vault-config.json
+VAULT_CONFIG="$HOME/.claude/obsidian/vault-config.json"
+mkdir -p "$HOME/.claude/obsidian"
+if [[ ! -f "$VAULT_CONFIG" ]]; then
+  echo '{"vaults":[],"defaults":{"link_format":"wiki","note_template":"# {title}\n\nProject: {project}\nDate: {date}\nTags: {tags}\n\n---\n\n{content}","architecture_note_template":"# Architecture — {project}\n\nGenerated: {date}\n\n---\n\n## Structure\n\n{structure}\n\n## Key Dependencies\n\n{deps}\n\n## Flows\n\n{flows}"}}' > "$VAULT_CONFIG"
+fi
+python3 - <<PYEOF
+import json, sys
+cfg_path = "$VAULT_CONFIG"
+vault_path = "$VAULT_DIR"
+vault_name = "$PROJECT"
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    # Check if already registered
+    existing = [v for v in cfg.get('vaults', []) if v.get('path') == vault_path]
+    if not existing:
+        cfg.setdefault('vaults', []).append({
+            "name": vault_name,
+            "path": vault_path,
+            "type": "project",
+            "wiki_links": True,
+            "architecture_graph": False
+        })
+        with open(cfg_path, 'w') as f:
+            json.dump(cfg, f, indent=2)
+        print(f"  vault-config.json: registered {vault_name}")
+    else:
+        print(f"  vault-config.json: {vault_name} already registered")
+except Exception as e:
+    print(f"  vault-config.json: update failed — {e}")
+PYEOF
+
 # ── 10. RuFlo ─────────────────────────────────────────────────
 section 10 "RuFlo V3 — agent swarm + memory"
 if ! command -v ruflo >/dev/null 2>&1; then
@@ -769,14 +841,21 @@ if $ENGINE_AVAILABLE; then
 
   if [[ -n "$FP_JSON" ]]; then
     "$ENGINE_VENV" "$ENGINE_FP" "$PROJECT_DIR" 2>/dev/null | sed 's/^/  /'
-    FP_SUMMARY="$FP_TYPE ($FP_CONFIDENCE) — $FP_FAILURE"
+    if [[ "$FP_USED_FALLBACK" == "true" ]]; then
+      FP_SUMMARY="$FP_TYPE ($FP_CONFIDENCE, heuristic fallback) — $FP_FAILURE"
+    else
+      FP_SUMMARY="$FP_TYPE ($FP_CONFIDENCE) — $FP_FAILURE"
+    fi
   else
     warn "Fingerprinter returned no output"
   fi
 
   # ── E2. Semgrep autofix scan ─────────────────────────────────
   echo -e "\n  ${BLUE}▸${NC} Running Semgrep autofix scan..."
-  if [[ -f "$ENGINE_SEMGREP" ]]; then
+  if [[ "$PROJECT_DIR" == *"rocket-support/workspace"* ]]; then
+    info "Workspace project — skipping duplicate semgrep scan (already ran in triage phase)"
+    SEMGREP_SUMMARY="skipped (triage already scanned)"
+  elif [[ -f "$ENGINE_SEMGREP" ]]; then
     # First pass: count issues
     SEMGREP_JSON=$("$ENGINE_SEMGREP" \
       --config "$ENGINE_RULES" \
@@ -854,9 +933,14 @@ fi
 echo ""
 
 if $RUN_DIAGNOSE; then
-  echo -e "  ${BOLD}${CYAN}Running full Claude diagnosis...${NC}"
+  echo -e "  ${BOLD}${CYAN}Running full deterministic diagnosis + fix pipeline...${NC}"
   echo ""
-  rkt --local "$PROJECT_DIR"
+  if [[ -x "$ENGINE_VENV" && -f "$ENGINE_SMART" ]]; then
+    "$ENGINE_VENV" "$ENGINE_SMART" "$PROJECT_DIR" "${SMART_ARGS[@]}"
+  else
+    warn "rkt_smart unavailable in engine venv — falling back to rkt --local"
+    rkt --local "$PROJECT_DIR"
+  fi
 else
   echo -e "  ${BOLD}Start working:${NC}"
   echo -e "  1. ${BOLD}Cursor${NC}    → Open Folder → $PROJECT_DIR → /audit-codebase"

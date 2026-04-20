@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-app — Rocket.new Flutter Project Setup
+# ============================================================
+
+RKT_HOME="${RKT_HOME:-$HOME/rocket-support}"
+ROCKET_BASE="git@github-rocket:vedang-rocket"
+ROCKET_DIR="$HOME/Documents/Rocket"
+OBSIDIAN_DIR="$HOME/Documents/Obsidian"
+V34_ZIP="$HOME/Downloads/rocket-cursor-rules-v34-final.zip"
+V34_DIR="$RKT_HOME/cursor-rules-v34"
+TOTAL_STEPS=11
+GLOBAL_MCP="$HOME/.claude/mcp.json"
+
+ENGINE_DIR="$RKT_HOME/engine"
+FLUTTER_ENGINE="$ENGINE_DIR/flutter_rkt_engine.py"
+
+GREEN='\033[0;32m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'
+YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
+
+ok()      { echo -e "  ${GREEN}✓${NC} $1"; }
+info()    { echo -e "  ${BLUE}▸${NC} $1"; }
+warn()    { echo -e "  ${YELLOW}⚠${NC} $1"; }
+fail()    { echo -e "\n  ${RED}✗ ERROR:${NC} $1\n"; exit 1; }
+skip()    { echo -e "  ${YELLOW}–${NC} $1 (skipped)"; }
+section() { echo -e "\n${BOLD}${CYAN}[$1/$TOTAL_STEPS] $2${NC}"; }
+
+setup_global_mcp() {
+  python3 - << 'PYEOF'
+import json, os
+
+mcp_path = os.path.expanduser("~/.claude/mcp.json")
+os.makedirs(os.path.expanduser("~/.claude"), exist_ok=True)
+
+existing = {}
+if os.path.exists(mcp_path):
+    try:
+        with open(mcp_path) as f:
+            existing = json.load(f)
+    except Exception:
+        existing = {}
+
+if "mcpServers" not in existing:
+    existing["mcpServers"] = {}
+
+new_servers = {
+    "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+    "sequential-thinking": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]},
+    "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+    "playwright": {"command": "npx", "args": ["@playwright/mcp@latest"]}
+}
+
+for name, config in new_servers.items():
+    if name not in existing["mcpServers"]:
+        existing["mcpServers"][name] = config
+
+with open(mcp_path, "w") as f:
+    json.dump(existing, f, indent=2)
+PYEOF
+}
+
+setup_global_mcp
+
+if [[ $# -eq 0 ]]; then
+  echo -e "\n${BOLD}rkt-app${NC} — Full Rocket.new Flutter project setup"
+  echo -e "Usage:   rkt-app <project-name> [--force] [--no-diagnose]"
+  echo -e "         rkt-app --local /path/to/project"
+  echo -e "         rkt-app /path/to/project"
+  exit 0
+fi
+
+LOCAL_PATH=""
+FORCE=0
+NO_DIAGNOSE=0
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local)
+      LOCAL_PATH="$2"
+      shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --no-diagnose)
+      NO_DIAGNOSE=1
+      shift
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+PROJECT="${ARGS[0]:-}"
+
+if [[ -z "$LOCAL_PATH" && -n "$PROJECT" ]]; then
+  if [[ "$PROJECT" == /* || "$PROJECT" == ~* ]]; then
+    LOCAL_PATH="$PROJECT"
+    PROJECT=$(basename "$LOCAL_PATH")
+  fi
+fi
+
+RUN_DIAGNOSE=true
+RUN_FORCE=false
+RUN_LOCAL=false
+[[ "$NO_DIAGNOSE" -eq 1 ]] && RUN_DIAGNOSE=false
+[[ "$FORCE" -eq 1 ]] && RUN_FORCE=true
+[[ -n "$LOCAL_PATH" ]] && RUN_LOCAL=true
+[[ "$LOCAL_PATH" == ~* ]] && LOCAL_PATH="${LOCAL_PATH/#\~/$HOME}"
+
+if $RUN_LOCAL; then
+  [[ -z "$LOCAL_PATH" ]] && fail "--local requires a path"
+  [[ -d "$LOCAL_PATH" ]] || fail "Local path not found: $LOCAL_PATH"
+  REPO_URL="local"
+  PROJECT_DIR="$LOCAL_PATH"
+else
+  if [[ "$PROJECT" == git@* || "$PROJECT" == http* ]]; then
+    REPO_URL="$PROJECT"
+    PROJECT="${PROJECT##*/}"
+    PROJECT="${PROJECT%.git}"
+    PROJECT_DIR="$ROCKET_DIR/$PROJECT"
+  else
+    PROJECT="${PROJECT%.git}"
+    REPO_URL="$ROCKET_BASE/${PROJECT}.git"
+    PROJECT_DIR="$ROCKET_DIR/$PROJECT"
+  fi
+fi
+VAULT_DIR="$OBSIDIAN_DIR/$PROJECT"
+
+echo -e "\n${BOLD}rkt-app${NC} → ${BOLD}$PROJECT${NC}"
+echo -e "Code:  $PROJECT_DIR"
+echo -e "Vault: $VAULT_DIR\n"
+
+_is_setup=false
+if [[ -d "$PROJECT_DIR/.cursor" && -f "$PROJECT_DIR/CLAUDE.md" ]]; then
+  _is_setup=true
+fi
+
+if $_is_setup && ! $RUN_FORCE; then
+  echo -e "  ${GREEN}✓${NC} Project already set up — running engine intelligence only"
+  echo -e "  ${YELLOW}–${NC} Use ${BOLD}--force${NC} to redo all 11 steps\n"
+  echo -e "${BOLD}${CYAN}── Engine Intelligence ──${NC}"
+  python3 "$FLUTTER_ENGINE" fingerprint "$PROJECT_DIR" || warn "fingerprint failed"
+  if $RUN_DIAGNOSE; then
+    python3 "$RKT_HOME/engine/flutter_rkt_engine.py" diagnose "$PROJECT_DIR" || warn "diagnose failed"
+  fi
+  exit 0
+fi
+
+section 1 "Clone or pull repository"
+if $RUN_LOCAL; then
+  ok "Using local folder: $PROJECT_DIR"
+else
+  mkdir -p "$ROCKET_DIR"
+  if [[ -d "$PROJECT_DIR/.git" ]]; then
+    info "Already cloned — pulling latest..."
+    git -C "$PROJECT_DIR" pull --quiet 2>/dev/null || warn "Pull failed — using existing code"
+  else
+    info "Cloning $REPO_URL"
+    git clone --quiet "$REPO_URL" "$PROJECT_DIR" || fail "Clone failed"
+  fi
+  git -C "$PROJECT_DIR" fetch --all --quiet 2>/dev/null || true
+  LATEST_BRANCH=$(git -C "$PROJECT_DIR" branch -r --sort=-committerdate 2>/dev/null | grep -v 'HEAD' | head -1 | xargs | sed 's|origin/||')
+  [[ -z "$LATEST_BRANCH" ]] && LATEST_BRANCH="main"
+  git -C "$PROJECT_DIR" checkout "$LATEST_BRANCH" --quiet 2>/dev/null || true
+  git -C "$PROJECT_DIR" pull --quiet origin "$LATEST_BRANCH" 2>/dev/null || true
+  CURRENT_BRANCH=$(git -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+  LAST_COMMIT=$(git -C "$PROJECT_DIR" log -1 --format="%h %s" 2>/dev/null || echo "no commits")
+  ok "Branch: $CURRENT_BRANCH | $LAST_COMMIT"
+fi
+
+section 2 "Install cursor rules"
+if [[ ! -d "$V34_DIR/.cursor" ]]; then
+  [[ -f "$V34_ZIP" ]] || fail "v34 zip not found at $V34_ZIP"
+  mkdir -p "$RKT_HOME/v34-tmp"
+  unzip -q "$V34_ZIP" -d "$RKT_HOME/v34-tmp"
+  SRC=$(find "$RKT_HOME/v34-tmp" -name "cursor.config" 2>/dev/null | head -1 | xargs dirname)
+  [[ -n "$SRC" ]] || fail "cursor.config not found inside zip"
+  mkdir -p "$V34_DIR"
+  cp -r "$SRC/." "$V34_DIR/"
+  rm -rf "$RKT_HOME/v34-tmp"
+fi
+mkdir -p "$PROJECT_DIR/.cursor"
+cp -r "$V34_DIR/.cursor/." "$PROJECT_DIR/.cursor/"
+ok "Cursor rules installed"
+
+section 3 "Graphify + UI/UX Pro Max"
+cd "$PROJECT_DIR" || fail "Cannot enter project"
+if command -v graphify >/dev/null 2>&1; then
+  graphify cursor install 2>/dev/null || true
+  graphify claude install 2>/dev/null || true
+  graphify hook install 2>/dev/null || true
+  ok "Graphify installed"
+else
+  warn "graphify not found"
+fi
+if command -v uipro >/dev/null 2>&1; then
+  uipro init --ai claude --force 2>/dev/null || true
+  uipro init --ai cursor --force 2>/dev/null || true
+  ok "UI/UX Pro Max initialized"
+fi
+
+section 4 "Generate CLAUDE.md (Flutter)"
+python3 "$RKT_HOME/engine/gen_claude_md.py" "$PROJECT_DIR" > "$PROJECT_DIR/CLAUDE.md" || fail "CLAUDE.md generation failed"
+python3 - << PYEOF
+import os, re
+project_dir = "$PROJECT_DIR"
+pubspec_path = os.path.join(project_dir, "pubspec.yaml")
+text = ""
+if os.path.isfile(pubspec_path):
+    text = open(pubspec_path, "r", encoding="utf-8", errors="replace").read()
+sm = re.search(r"^\s*supabase_flutter:\s*([^\n#]+)", text, re.MULTILINE)
+supabase_v = sm.group(1).strip() if sm else "none"
+def dep(name):
+    return bool(re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE))
+state = "none"
+for cand in ("flutter_riverpod", "provider", "bloc", "getx"):
+    if dep(cand):
+        state = "riverpod" if cand == "flutter_riverpod" else cand
+        break
+has_supabase = bool(sm)
+has_google = dep("google_sign_in")
+print("  \033[0;32m✓\033[0m CLAUDE.md generated")
+print(f"  \033[0;34m▸\033[0m Flutter | supabase_flutter {supabase_v} | {state.capitalize()} | Supabase: {str(has_supabase).lower()} | Google auth: {str(has_google).lower()}")
+PYEOF
+
+section 5 "Copy global skills to project"
+mkdir -p "$PROJECT_DIR/.claude/skills"
+for skill in "$HOME/.claude/skills"/*.md; do
+  [[ -f "$skill" ]] || continue
+  cp "$skill" "$PROJECT_DIR/.claude/skills/"
+done
+ok "Global skills copied"
+
+section 6 "MCP servers"
+python3 - << PYEOF
+import json, os, re
+project_dir = "$PROJECT_DIR"
+env_path = os.path.join(project_dir, "env.json")
+supabase_ref = ""
+if os.path.isfile(env_path):
+    try:
+        data = json.loads(open(env_path, "r", encoding="utf-8").read())
+        url = data.get("SUPABASE_URL", "")
+        m = re.search(r"https://([^.]+)\.supabase\.co", url or "")
+        if m:
+            supabase_ref = m.group(1)
+    except Exception:
+        pass
+mcp = {
+  "mcpServers": {
+    "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+    "sequential-thinking": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]},
+    "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+    "playwright": {"command": "npx", "args": ["@playwright/mcp@latest"]},
+    "code-review-graph": {"command": "uvx", "args": ["code-review-graph", "mcp"]}
+  }
+}
+if supabase_ref:
+    mcp["supabase_project_ref"] = supabase_ref
+with open(os.path.join(project_dir, ".mcp.json"), "w", encoding="utf-8") as f:
+    json.dump(mcp, f, indent=2)
+print("  \033[0;32m✓\033[0m .mcp.json written")
+PYEOF
+
+section 7 "Build code-review-graph"
+if command -v uvx >/dev/null 2>&1; then
+  uvx code-review-graph build 2>/dev/null && ok "code-review-graph built" || warn "code-review-graph build failed"
+else
+  skip "uvx not found"
+fi
+
+section 8 "Graphify install"
+if command -v graphify >/dev/null 2>&1; then
+  graphify cursor install 2>/dev/null || true
+  graphify claude install 2>/dev/null || true
+  graphify hook install 2>/dev/null || true
+  ok "graphify installs done"
+else
+  skip "graphify not available"
+fi
+
+section 9 "Setup Obsidian vault"
+mkdir -p "$VAULT_DIR"/{Architecture,Screens,Bugs,Decisions,Daily}
+cat > "$VAULT_DIR/index.md" << EOF
+# $PROJECT
+- Stack: Flutter + Supabase
+- Most likely failure modes: Supabase v1 APIs, missing deep links, env.json not loaded, missing auth listener
+EOF
+ok "Obsidian vault ready"
+
+section 10 "Init RuFlo"
+if command -v ruflo >/dev/null 2>&1; then
+  cd "$PROJECT_DIR" || exit 1
+  ruflo init --force 2>/dev/null || true
+  ruflo memory init --force 2>/dev/null || true
+  ruflo start --daemon 2>/dev/null || true
+  ok "RuFlo initialized"
+else
+  skip "ruflo not found"
+fi
+
+section 11 "Update .gitignore"
+touch "$PROJECT_DIR/.gitignore"
+if ! grep -q "rkt-app — local dev setup" "$PROJECT_DIR/.gitignore"; then
+  cat >> "$PROJECT_DIR/.gitignore" << 'EOF'
+
+# rkt-app — local dev setup (never push)
+.cursor/
+CLAUDE.md
+.claude-flow/
+.swarm/
+graphify-out/
+code-review-graph/
+.mcp.json
+.claude/
+memory-bank/
+# Flutter build outputs (should already be in .gitignore)
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+EOF
+fi
+ok ".gitignore updated"
+
+echo -e "\n${BOLD}${CYAN}── Engine Intelligence ──${NC}"
+python3 "$FLUTTER_ENGINE" fingerprint "$PROJECT_DIR" || warn "fingerprint failed"
+
+if $RUN_DIAGNOSE; then
+  python3 "$RKT_HOME/engine/flutter_rkt_engine.py" diagnose "$PROJECT_DIR" || warn "diagnose failed"
+fi

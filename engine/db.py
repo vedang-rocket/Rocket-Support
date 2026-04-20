@@ -122,6 +122,85 @@ def init_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_project_type_name ON projects(project_type)
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS flutter_fixes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_id TEXT,
+            error_signature TEXT,
+            category TEXT,
+            chain TEXT,
+            file_pattern TEXT,
+            fix_diff TEXT,
+            fix_hint TEXT,
+            verified BOOLEAN DEFAULT 0,
+            uses INTEGER DEFAULT 1,
+            project_type TEXT,
+            flutter_version TEXT,
+            supabase_version TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS diag_cache (
+            cache_key  TEXT PRIMARY KEY,
+            findings   TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _cache_key(repo_path: str) -> str:
+    """Hash of repo_path + mtimes of key auth/stripe files."""
+    repo_path = os.path.abspath(os.path.expanduser(repo_path))
+    key_files = [
+        "package.json",
+        "middleware.ts",
+        "lib/supabase/server.ts",
+        "lib/supabase/middleware.ts",
+        "app/api/webhooks/stripe/route.ts",
+    ]
+    parts = [repo_path]
+    for rel in key_files:
+        abs_p = os.path.join(repo_path, rel)
+        try:
+            parts.append(f"{rel}:{os.path.getmtime(abs_p):.0f}")
+        except OSError:
+            parts.append(f"{rel}:missing")
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:24]
+
+
+def get_cached_findings(repo_path: str, ttl_seconds: int = 3600) -> Optional[List[Any]]:
+    """Return cached chain_walker findings or None if missing/stale."""
+    init_db()
+    key = _cache_key(repo_path)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT findings, created_at FROM diag_cache WHERE cache_key = ?", (key,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    age = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(row["created_at"])).total_seconds()
+    if age > ttl_seconds:
+        return None
+    try:
+        return json.loads(row["findings"])
+    except Exception:
+        return None
+
+
+def set_cached_findings(repo_path: str, findings: List[Any]) -> None:
+    """Store chain_walker findings in cache."""
+    init_db()
+    key = _cache_key(repo_path)
+    now = datetime.datetime.utcnow().isoformat()
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO diag_cache (cache_key, findings, created_at) VALUES (?, ?, ?)",
+        (key, json.dumps(findings), now),
+    )
     conn.commit()
     conn.close()
 
@@ -311,6 +390,99 @@ def get_all_fixes() -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def save_flutter_fix(finding: Dict[str, Any], repo_path: str) -> int:
+    init_db()
+    conn = get_conn()
+    pattern_id = finding.get("pattern_id", finding.get("chain", "unknown"))
+    category = finding.get("category", finding.get("chain", "OTHER"))
+    file_pattern = finding.get("file_pattern") or finding.get("file") or finding.get("broken_at", "")
+    error_signature = finding.get("error_signature")
+    if not error_signature:
+        error_signature = f"{category}|{pattern_id}|{file_pattern}"
+    existing = conn.execute(
+        """SELECT id FROM flutter_fixes
+           WHERE pattern_id = ? AND error_signature = ? AND file_pattern = ?""",
+        (pattern_id, error_signature, file_pattern),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """UPDATE flutter_fixes
+               SET uses = uses + 1,
+                   fix_diff = COALESCE(?, fix_diff),
+                   fix_hint = COALESCE(?, fix_hint),
+                   category = COALESCE(?, category),
+                   chain = COALESCE(?, chain)
+               WHERE id = ?""",
+            (
+                finding.get("fix_diff"),
+                finding.get("fix_hint"),
+                category,
+                finding.get("chain"),
+                existing["id"],
+            ),
+        )
+        row_id = int(existing["id"])
+    else:
+        cur = conn.execute(
+            """INSERT INTO flutter_fixes
+               (pattern_id, error_signature, category, chain, file_pattern, fix_diff, fix_hint,
+                verified, uses, project_type, flutter_version, supabase_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+            (
+                pattern_id,
+                error_signature,
+                category,
+                finding.get("chain"),
+                file_pattern,
+                finding.get("fix_diff"),
+                finding.get("fix_hint"),
+                int(bool(finding.get("verified", 0))),
+                finding.get("project_type", "Other"),
+                finding.get("flutter_version"),
+                finding.get("supabase_version"),
+            ),
+        )
+        row_id = int(cur.lastrowid)
+
+    conn.commit()
+    conn.close()
+    return row_id
+
+
+def lookup_flutter_fix(findings: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    init_db()
+    conn = get_conn()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM flutter_fixes ORDER BY uses DESC").fetchall()]
+    conn.close()
+    if not rows or not findings:
+        return None
+
+    def _sig(f: Dict[str, Any]) -> str:
+        category = f.get("category", f.get("chain", "OTHER"))
+        pattern_id = f.get("pattern_id", f.get("chain", "unknown"))
+        file_pattern = f.get("file_pattern") or f.get("file") or f.get("broken_at", "")
+        return f"{category}|{pattern_id}|{file_pattern}"
+
+    best = None
+    best_score = 0.0
+    for finding in findings:
+        qsig = _sig(finding)
+        q_words = set(qsig.lower().replace("|", " ").replace("/", " ").split())
+        for row in rows:
+            rsig = row.get("error_signature") or f"{row.get('category','')}|{row.get('pattern_id','')}|{row.get('file_pattern','')}"
+            r_words = set(rsig.lower().replace("|", " ").replace("/", " ").split())
+            overlap = len(q_words & r_words)
+            score = overlap / max(len(q_words | r_words), 1)
+            if score > best_score:
+                best_score = score
+                best = row
+    if best and best_score > 0.60:
+        best["_score"] = best_score
+        return best
+    return None
+
+
 def seed_builtin_fixes():
     """Seed the database with the 10 known Rocket.new hard-rule fixes."""
     fixes = [
@@ -433,6 +605,34 @@ CREATE POLICY "Authenticated users read leads" ON leads FOR SELECT USING (auth.r
             "category": "AUTH",
             "project_type": "SaaS",
             "fix_diff": "In Supabase Dashboard → Authentication → URL Configuration → Add your deployed URL (https://yourapp.netlify.app) to Redirect URLs",
+            "verified": 1,
+        },
+        {
+            "pattern": "CSP headers missing in next.config — preview issues / scripts blocked",
+            "error_signature": "preview broken | Refused to load script | connect-src blocked | CSP violation | Content-Security-Policy | wss supabase blocked | googletagmanager blocked | static.rocket.new blocked",
+            "category": "BUILD",
+            "project_type": "SaaS",
+            "fix_diff": """--- a/next.config.ts
++++ b/next.config.ts
++const securityHeaders = [
++  {
++    key: 'Content-Security-Policy',
++    value: [
++      "default-src 'self'",
++      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com https://pagead2.googlesyndication.com https://static.rocket.new",
++      "script-src-elem 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com https://pagead2.googlesyndication.com https://static.rocket.new",
++      "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.openai.com https://bws.bioid.com https://*.bioid.com https://api.tryterra.co https://appanalytics.rocket.new",
++      "img-src 'self' data: blob: https:",
++      "font-src 'self' https://fonts.gstatic.com",
++      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
++    ].join('; '),
++  },
++]
+ const nextConfig = {
++  async headers() {
++    return [{ source: '/(.*)', headers: securityHeaders }]
++  },
+ }""",
             "verified": 1,
         },
     ]

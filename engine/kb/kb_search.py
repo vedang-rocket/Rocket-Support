@@ -157,7 +157,7 @@ def _build_from_mds():
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def search(query: str, top_k: int = 2) -> List[Dict]:
+def search(query: str, top_k: int = 2, source_tag: Optional[str] = None) -> List[Dict]:
     """
     Search KB for chunks relevant to query using TF-IDF cosine similarity.
     Returns list of {source, chunk, score} dicts, best first.
@@ -191,6 +191,11 @@ def search(query: str, top_k: int = 2) -> List[Dict]:
     # Score each chunk via cosine similarity
     scores = []
     for i, chunk_tf in enumerate(_tf):
+        source = _chunks[i].get("source", "")
+        if source_tag == "flutter" and not source.startswith("flutter_"):
+            continue
+        if source_tag == "nextjs" and source.startswith("flutter_"):
+            continue
         dot = 0.0
         for t, qv in q_vec.items():
             if t in chunk_tf:

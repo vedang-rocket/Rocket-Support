@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# rkt-quick — Zero-LLM fast diagnosis: chain_walker + brain.db only (<2s)
+# Usage: rkt-quick <project_path> ["hint"]
+set -euo pipefail
+
+RKT_HOME="${RKT_HOME:-$HOME/rocket-support}"
+PYTHON="$RKT_HOME/engine/.venv/bin/python3"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: rkt-quick <project_path> [\"hint\"]"
+  exit 1
+fi
+
+exec "$PYTHON" "$RKT_HOME/engine/rkt_smart.py" --quick "$@"

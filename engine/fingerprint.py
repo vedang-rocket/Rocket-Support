@@ -3,10 +3,12 @@ Project fingerprinter — detects Rocket.new project type from package.json + fi
 Returns one of: SaaS | E-Commerce | AI | Booking | Landing | Blog | Unknown
 """
 
+import fnmatch
 import json
 import os
-import glob
 from typing import Dict, Any, List, Optional
+
+SKIP_DIRS = {"node_modules", ".next", ".git", "__pycache__", ".rkt_snapshot", "dist", ".turbo"}
 
 
 # ── Signal definitions ───────────────────────────────────────────────────────
@@ -72,20 +74,13 @@ def _get_all_deps(pkg: Dict[str, Any]) -> List[str]:
 
 
 def _find_sql_files(repo_path: str) -> List[str]:
-    """Find SQL migration files or schema files."""
-    patterns = [
-        "supabase/migrations/**/*.sql",
-        "supabase/seed.sql",
-        "database/**/*.sql",
-        "db/**/*.sql",
-        "migrations/**/*.sql",
-        "schema.sql",
-        "*.sql",
-    ]
+    """Find SQL files using os.walk, pruning skip dirs before descending."""
     found = []
-    for pattern in patterns:
-        matches = glob.glob(os.path.join(repo_path, pattern), recursive=True)
-        found.extend(matches)
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            if f.endswith(".sql"):
+                found.append(os.path.join(root, f))
     return found
 
 
@@ -102,11 +97,17 @@ def _read_sql_content(sql_files: List[str]) -> str:
 
 
 def _scan_file_patterns(repo_path: str, patterns: List[str]) -> int:
-    """Return count of files matching any pattern."""
+    """Count files matching any pattern using os.walk, pruning skip dirs before descending."""
     count = 0
-    for pattern in patterns:
-        matches = glob.glob(os.path.join(repo_path, pattern), recursive=True)
-        count += len(matches)
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            full = os.path.join(root, f)
+            rel  = os.path.relpath(full, repo_path)
+            for pat in patterns:
+                if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(f, pat.split("/")[-1]):
+                    count += 1
+                    break  # only count each file once
     return count
 
 
@@ -220,9 +221,16 @@ def fingerprint(repo_path: str) -> Dict[str, Any]:
     scores = _score_project_type(repo_path, pkg)
     best_type = max(scores, key=scores.__getitem__) if scores else "Unknown"
     confidence = scores.get(best_type, 0.0)
+    used_fallback = False
+    signal_health = "ok"
+    fallback_reason = ""
+    max_score = max(scores.values()) if scores else 0.0
 
     # If all scores are zero or very low, do a heuristic fallback
     if confidence < 0.05:
+        used_fallback = True
+        signal_health = "low_signal"
+        fallback_reason = f"max score {max_score:.3f} below threshold"
         has_stripe = _detect_has_stripe(all_deps)
         has_supabase = _detect_has_supabase(all_deps)
         sql_files = _find_sql_files(repo_path)
@@ -259,6 +267,10 @@ def fingerprint(repo_path: str) -> Dict[str, Any]:
         "env_vars": env_vars,
         "sql_files_found": len(sql_files),
         "all_deps": all_deps[:30],  # First 30 for context
+        "used_fallback": used_fallback,
+        "signal_health": signal_health,
+        "fallback_reason": fallback_reason,
+        "max_score": max_score,
     }
 
 
@@ -274,6 +286,9 @@ def print_human(result: Dict[str, Any], repo_path: str = ""):
     print(f"SQL files:       {result['sql_files_found']}")
     print(f"Most likely bug: {result['common_failure']}")
     print(f"Category:        {result['category']}")
+    if result.get("used_fallback"):
+        print("Signal health:   low-signal (heuristic fallback used)")
+        print(f"Fallback reason: {result.get('fallback_reason', 'insufficient project signals')}")
     print(f"\nType scores:")
     for t, s in sorted(result["all_scores"].items(), key=lambda x: -x[1]):
         bar = "█" * int(s * 20)

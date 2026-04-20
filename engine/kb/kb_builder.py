@@ -27,6 +27,11 @@ SOURCES = {
     "nextjs_middleware": "https://raw.githubusercontent.com/vercel/next.js/canary/docs/01-app/03-api-reference/03-file-conventions/proxy.mdx",
     "nextjs_cookies":   "https://raw.githubusercontent.com/vercel/next.js/canary/docs/01-app/03-api-reference/04-functions/cookies.mdx",
     "nextjs_15_upgrade": "https://raw.githubusercontent.com/vercel/next.js/canary/docs/01-app/02-guides/upgrading/version-15.mdx",
+    "flutter_supabase_quickstart": "https://raw.githubusercontent.com/supabase/supabase/master/apps/docs/content/guides/getting-started/quickstarts/flutter.mdx",
+    "flutter_supabase_v2_upgrade": "https://raw.githubusercontent.com/supabase/supabase/master/apps/docs/content/reference/dart/upgrade-guide.mdx",
+    "flutter_supabase_auth": "https://raw.githubusercontent.com/supabase/supabase/master/apps/docs/content/guides/getting-started/tutorials/with-flutter.mdx",
+    "flutter_deep_links": "https://raw.githubusercontent.com/flutter/website/main/src/content/ui/navigation/deep-linking.md",
+    "flutter_pubspec": "https://raw.githubusercontent.com/flutter/website/main/src/content/tools/pubspec.md",
 }
 
 # Fallback URLs if primary 404s

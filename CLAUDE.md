@@ -1,153 +1,244 @@
-# Rocket.new Support Engineer — Global Rules
+# Claude Code Configuration - RuFlo V3
 
-You are a Rocket.new support engineer diagnosing and fixing client projects.
-Stack: Next.js App Router (TypeScript) · Supabase @supabase/ssr · Tailwind · Netlify/Vercel · Stripe (optional)
+## Behavioral Rules (Always Enforced)
 
-**Mode: SPEED. Target: diagnose and output fix in under 90 seconds.**
-Do not explain theory. Do not ask questions. Diagnose → fix → output diff.
+- Do what has been asked; nothing more, nothing less
+- NEVER create files unless they're absolutely necessary for achieving your goal
+- ALWAYS prefer editing an existing file to creating a new one
+- NEVER proactively create documentation files (*.md) or README files unless explicitly requested
+- NEVER save working files, text/mds, or tests to the root folder
+- Never continuously check status after spawning a swarm — wait for results
+- ALWAYS read a file before editing it
+- NEVER commit secrets, credentials, or .env files
 
----
+## File Organization
 
-## THE 10 HARD RULES — NEVER VIOLATE
+- NEVER save to root folder — use the directories below
+- Use `/src` for source code files
+- Use `/tests` for test files
+- Use `/docs` for documentation and markdown files
+- Use `/config` for configuration files
+- Use `/scripts` for utility scripts
+- Use `/examples` for example code
 
-1. `getUser()` not `getSession()` in server code — getSession() doesn't validate JWT
-2. `request.text()` not `request.json()` in Stripe webhook handlers
-3. `middleware.ts` at PROJECT ROOT — never inside `/app`
-4. `@supabase/ssr` only — never `@supabase/auth-helpers-nextjs` (deprecated)
-5. `await cookies()` — required in Next.js 15, not optional
-6. Never `NEXT_PUBLIC_` prefix on service role / secret keys
-7. Never produce `// ... existing code ...` in diffs — Lazy Delete bug
-8. Always `export const dynamic = 'force-dynamic'` on authenticated pages
-9. Social OAuth never works on localhost — test on deployed URL only
-10. New Supabase projects (post-Nov 2025): `sb_publishable_` key, not `anon_key`
+## Project Architecture
 
----
+- Follow Domain-Driven Design with bounded contexts
+- Keep files under 500 lines
+- Use typed interfaces for all public APIs
+- Prefer TDD London School (mock-first) for new code
+- Use event sourcing for state changes
+- Ensure input validation at system boundaries
 
-## FAST DIAGNOSTIC ROUTING
+### Project Config
 
-When you see these symptoms, go straight to this fix:
+- **Topology**: hierarchical-mesh
+- **Max Agents**: 15
+- **Memory**: hybrid
+- **HNSW**: Enabled
+- **Neural**: Enabled
 
-| Symptom | Root cause | Fix |
-|---|---|---|
-| "Not authenticated" after login | getSession() in server | Replace with getUser() |
-| Dashboard blank after signup | Profile trigger missing | Add on_auth_user_created trigger |
-| Stripe webhook 400 | request.json() used | Change to request.text() |
-| Data not showing (authenticated) | RLS policy missing | Add SELECT policy for auth.uid() |
-| Works locally, broken on deploy | Redirect URL missing | Add deployed URL to Supabase Auth settings |
-| OAuth redirect loop | middleware.ts in /app | Move to project root |
-| "Invalid API key" Supabase | Wrong env var name | Check sb_publishable_ vs anon_key |
-| Build fails on Netlify | TS errors or missing env | Run tsc --noEmit, check env vars |
-| Webhook secret fails | STRIPE_WEBHOOK_SECRET missing | Add to .env and Netlify env |
-| Empty array from Supabase | RLS on, zero policies | Add user policies |
-| "cookies() should be awaited" | Next.js 15 pattern | Add await before cookies() |
-| Data saves locally, not in prod | Migrations not pushed | Push via supabase db push |
+## Build & Test
 
----
+```bash
+# Build
+npm run build
 
-## EXACT CODE PATTERNS
+# Test
+npm test
 
-### Auth — server client (correct)
-```typescript
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-export async function createClient() {
-  const cookieStore = await cookies()  // await required in Next.js 15
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: { getAll: () => cookieStore.getAll(), setAll: (c) => { try { c.forEach(({name,value,options}) => cookieStore.set(name,value,options)) } catch {} } } }
-  )
-}
+# Lint
+npm run lint
 ```
 
-### Auth — protected page (correct)
-```typescript
-const { data: { user }, error } = await supabase.auth.getUser()  // NOT getSession()
-if (error || !user) redirect('/login')
-export const dynamic = 'force-dynamic'  // required on all auth pages
+- ALWAYS run tests after making code changes
+- ALWAYS verify build succeeds before committing
+
+## Security Rules
+
+- NEVER hardcode API keys, secrets, or credentials in source files
+- NEVER commit .env files or any file containing secrets
+- Always validate user input at system boundaries
+- Always sanitize file paths to prevent directory traversal
+- Run `npx @claude-flow/cli@latest security scan` after security-related changes
+
+## Concurrency: 1 MESSAGE = ALL RELATED OPERATIONS
+
+- All operations MUST be concurrent/parallel in a single message
+- Use Claude Code's Agent tool for spawning agents, not just MCP
+- ALWAYS spawn ALL agents in ONE message with full instructions via Agent tool
+- ALWAYS batch ALL file reads/writes/edits in ONE message
+- ALWAYS batch ALL Bash commands in ONE message
+
+## Swarm Orchestration
+
+- MUST initialize the swarm using CLI tools when starting complex tasks
+- MUST spawn concurrent agents using Claude Code's Agent tool
+- Never use CLI tools alone for execution — Agent tool agents do the actual work
+- MUST call CLI tools AND Agent tool in ONE message for complex work
+
+### 3-Tier Model Routing (ADR-026)
+
+| Tier | Handler | Latency | Cost | Use Cases |
+|------|---------|---------|------|-----------|
+| **1** | Agent Booster (WASM) | <1ms | $0 | Simple transforms (var→const, add types) — Skip LLM |
+| **2** | Haiku | ~500ms | $0.0002 | Simple tasks, low complexity (<30%) |
+| **3** | Sonnet/Opus | 2-5s | $0.003-0.015 | Complex reasoning, architecture, security (>30%) |
+
+- For Tier 1 simple transforms, use Edit tool directly — no LLM agent needed
+
+## Swarm Configuration & Anti-Drift
+
+- ALWAYS use hierarchical topology for coding swarms
+- Keep maxAgents at 6-8 for tight coordination
+- Use specialized strategy for clear role boundaries
+- Use `raft` consensus for hive-mind (leader maintains authoritative state)
+- Run frequent checkpoints via `post-task` hooks
+- Keep shared memory namespace for all agents
+
+```bash
+npx @claude-flow/cli@latest swarm init --topology hierarchical --max-agents 8 --strategy specialized
 ```
 
-### Stripe webhook (correct)
-```typescript
-const body = await request.text()       // NOT request.json()
-const sig = headers().get('stripe-signature')!
-const event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
+## Swarm Execution Rules
+
+- ALWAYS use `run_in_background: true` for all Agent tool calls
+- ALWAYS put ALL Agent calls in ONE message for parallel execution
+- After spawning, STOP — do NOT add more tool calls or check status
+- Never poll agent status repeatedly — trust agents to return
+- When agent results arrive, review ALL results before proceeding
+
+## V3 CLI Commands
+
+### Core Commands
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `init` | 4 | Project initialization |
+| `agent` | 8 | Agent lifecycle management |
+| `swarm` | 6 | Multi-agent swarm coordination |
+| `memory` | 11 | AgentDB memory with HNSW search |
+| `task` | 6 | Task creation and lifecycle |
+| `session` | 7 | Session state management |
+| `hooks` | 17 | Self-learning hooks + 12 workers |
+| `hive-mind` | 6 | Byzantine fault-tolerant consensus |
+
+### Quick CLI Examples
+
+```bash
+npx @claude-flow/cli@latest init --wizard
+npx @claude-flow/cli@latest agent spawn -t coder --name my-coder
+npx @claude-flow/cli@latest swarm init --v3-mode
+npx @claude-flow/cli@latest memory search --query "authentication patterns"
+npx @claude-flow/cli@latest doctor --fix
 ```
 
-### RLS policy template
-```sql
-ALTER TABLE your_table ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users see own data" ON your_table FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users insert own data" ON your_table FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users update own data" ON your_table FOR UPDATE USING (auth.uid() = user_id);
+## Available Agents (16 Roles + Custom)
+
+### Core Development
+`coder`, `reviewer`, `tester`, `planner`, `researcher`
+
+### Specialized
+`security-architect`, `security-auditor`, `memory-specialist`, `performance-engineer`
+
+### Coordination
+`hierarchical-coordinator`, `mesh-coordinator`, `adaptive-coordinator`
+
+### GitHub & Repository
+`pr-manager`, `code-review-swarm`, `issue-tracker`, `release-manager`
+
+Any string can be used as a custom agent type — these are the typed roles with specialized behavior.
+
+## Memory & Vector Search
+
+### MCP Tools (use via ToolSearch to discover)
+
+| Tool | Description |
+|------|-------------|
+| `memory_store` | Store value with ONNX 384-dim vector embedding |
+| `memory_search` | Semantic vector search by query |
+| `memory_retrieve` | Get entry by key |
+| `memory_list` | List entries in namespace |
+| `memory_delete` | Delete entry |
+| `memory_import_claude` | Import Claude Code memories into AgentDB (allProjects=true for all) |
+| `memory_search_unified` | Search across ALL namespaces (Claude + AgentDB + patterns) |
+| `memory_bridge_status` | Show bridge health, vectors, SONA, intelligence |
+
+### CLI Commands
+
+```bash
+# Store with vector embedding
+npx @claude-flow/cli@latest memory store --key "pattern-auth" --value "JWT with refresh" --namespace patterns
+
+# Semantic search
+npx @claude-flow/cli@latest memory search --query "authentication patterns"
+
+# Import all Claude Code memories into AgentDB
+node .claude/helpers/auto-memory-hook.mjs import-all
 ```
 
-### Profile trigger (if missing)
-```sql
-CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
-BEGIN
-  INSERT INTO public.profiles (id, display_name, avatar_url)
-  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email), NEW.raw_user_meta_data->>'avatar_url');
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+### Claude Code ↔ AgentDB Bridge
 
-CREATE OR REPLACE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+Claude Code auto-memory files (`~/.claude/projects/*/memory/*.md`) are automatically imported into AgentDB with ONNX vector embeddings on session start. Use `memory_search_unified` to search across both stores.
+
+## Key MCP Tools (314 available — use ToolSearch to discover)
+
+### Most Used Tools
+
+| Category | Tools | What They Do |
+|----------|-------|-------------|
+| **Memory** | `memory_store`, `memory_search`, `memory_search_unified` | Store/search with ONNX vector embeddings |
+| **Claude Bridge** | `memory_import_claude`, `memory_bridge_status` | Import Claude memories into AgentDB |
+| **Swarm** | `swarm_init`, `swarm_status`, `swarm_health` | Multi-agent coordination |
+| **Agents** | `agent_spawn`, `agent_list`, `agent_status` | Agent lifecycle |
+| **Hive-Mind** | `hive-mind_init`, `hive-mind_spawn`, `hive-mind_consensus` | Byzantine/Raft consensus |
+| **Hooks** | `hooks_route`, `hooks_session-start`, `hooks_post-task` | Task routing + learning |
+| **Workers** | `hooks_worker-list`, `hooks_worker-dispatch` | 12 background workers |
+| **Security** | `aidefence_scan`, `aidefence_is_safe` | Prompt injection detection |
+| **Intelligence** | `hooks_intelligence`, `neural_status` | Pattern learning + SONA |
+
+### Swarm Capabilities
+
+- **Topologies**: hierarchical (anti-drift), mesh, ring, star, adaptive
+- **Consensus**: Raft (leader-based), Byzantine (PBFT), Gossip (eventual)
+- **Hive-Mind**: Queen-led coordination with spawn, broadcast, consensus voting, shared memory
+- **12 Background Workers**: audit, optimize, testgaps, map, deepdive, document, refactor, benchmark, ultralearn, consolidate, predict, preload
+
+### Memory Capabilities
+
+- **ONNX Embeddings**: all-MiniLM-L6-v2, 384 dimensions — real neural vectors
+- **DiskANN**: SSD-friendly vector search (8,000x faster insert than HNSW, perfect recall at 1K)
+- **sql.js**: Cross-platform SQLite (WASM, no native compilation)
+- **Claude Code Bridge**: Auto-imports MEMORY.md files into AgentDB on session start
+- **Unified Search**: `memory_search_unified` searches Claude memories + AgentDB + patterns
+- **SONA Learning**: Trajectory recording → pattern extraction → file persistence
+
+### How to Discover Tools
+
+Use ToolSearch to find specific tools:
+```
+ToolSearch("memory search")     → memory_store, memory_search, memory_search_unified
+ToolSearch("swarm")             → swarm_init, swarm_status, swarm_health, swarm_shutdown
+ToolSearch("hive consensus")    → hive-mind_consensus, hive-mind_status
+ToolSearch("+aidefence")        → aidefence_scan, aidefence_is_safe, aidefence_has_pii
 ```
 
-### Middleware (correct location and content)
-```typescript
-// middleware.ts — PROJECT ROOT, not /app/middleware.ts
-import { type NextRequest } from 'next/server'
-import { updateSession } from '@/lib/supabase/middleware'
-export async function middleware(request: NextRequest) {
-  return await updateSession(request)
-}
-export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'] }
+## Quick Setup
+
+```bash
+claude mcp add claude-flow -- npx -y @claude-flow/cli@latest
+npx @claude-flow/cli@latest daemon start
+npx @claude-flow/cli@latest doctor --fix
 ```
 
----
+## Claude Code vs MCP Tools
 
-## OUTPUT FORMAT — ALWAYS USE THIS EXACT STRUCTURE
+- **Claude Code Agent tool** handles execution: agents, file ops, code generation, git
+- **MCP tools** (via ToolSearch) handle coordination: swarm, memory, hooks, routing, hive-mind
+- **CLI commands** (via Bash) are the same tools with terminal output
+- Use `ToolSearch("keyword")` to discover available MCP tools
 
-```
-## ROOT CAUSE
-[One sentence — specific, not vague]
+## Support
 
-## CATEGORY
-[AUTH | SUPABASE | STRIPE | BUILD | ENV | OTHER]
-
-## FIX
-[2-3 sentences on what changed and why]
-
-## FILES CHANGED
-- filename: what changed
-
-## DIFF
-\`\`\`diff
-[complete unified diff — no ellipsis, full file content]
-\`\`\`
-
-## VERIFY
-\`\`\`bash
-[command to confirm fix works]
-\`\`\`
-
-## IF STILL BROKEN
-[One specific fallback]
-```
-
----
-
-## WHAT NOT TO DO
-
-- Do NOT explain what Supabase is
-- Do NOT suggest "check the docs"
-- Do NOT ask "can you share more context"
-- Do NOT refactor code that wasn't broken
-- Do NOT change unrelated files
-- Do NOT produce ellipsis in diffs
-- Do NOT output theory — output the fix
+- Documentation: https://github.com/ruvnet/ruflo
+- Issues: https://github.com/ruvnet/ruflo/issues

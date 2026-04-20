@@ -23,6 +23,7 @@ import shutil
 import tempfile
 import datetime
 import time
+import re
 from typing import Dict, Any, List, Optional, Tuple
 
 # Add engine dir to path
@@ -52,6 +53,38 @@ ERR  = lambda t: _c("0;31", f"ERR {t}")
 STEP = lambda t: _c("1;36", f"\n── {t} ──")
 
 
+_SENSITIVE_ENV_KEY_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PRIVATE|WEBHOOK|SERVICE_ROLE|JWT)[A-Za-z0-9_]*)=(.*)$",
+    re.IGNORECASE,
+)
+_JWT_LIKE_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b")
+_BEARER_RE = re.compile(r"(Bearer\s+)([A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE)
+_KNOWN_SECRET_PREFIX_RE = re.compile(
+    r"\b(?:sk|rk|pk|sbp|sbr|xox[baprs]|ghp|github_pat)_[A-Za-z0-9_\-]{12,}\b",
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive_text(text: str) -> str:
+    if not text:
+        return text
+    out_lines: List[str] = []
+    for line in text.splitlines(keepends=True):
+        line_no_nl = line.rstrip("\n")
+        m = _SENSITIVE_ENV_KEY_RE.match(line_no_nl.strip())
+        if m:
+            key = m.group(1)
+            redacted = f"{key}=***REDACTED***"
+            out_lines.append(redacted + ("\n" if line.endswith("\n") else ""))
+            continue
+        redacted = _JWT_LIKE_RE.sub("***REDACTED_JWT***", line_no_nl)
+        redacted = _BEARER_RE.sub(r"\1***REDACTED***", redacted)
+        # Redact known token/key prefixes while preserving normal identifiers.
+        redacted = _KNOWN_SECRET_PREFIX_RE.sub("***REDACTED***", redacted)
+        out_lines.append(redacted + ("\n" if line.endswith("\n") else ""))
+    return "".join(out_lines)
+
+
 # ── Semgrep runner ────────────────────────────────────────────────────────────
 
 def run_semgrep(repo_path: str, autofix: bool = False) -> Dict[str, Any]:
@@ -71,6 +104,13 @@ def run_semgrep(repo_path: str, autofix: bool = False) -> Dict[str, Any]:
     ]
     if autofix:
         cmd.append("--autofix")
+
+    semgrepignore_path = os.path.join(repo_path, ".semgrepignore")
+    try:
+        with open(semgrepignore_path, "w") as f:
+            f.write(".rkt_snapshot/\nnode_modules/\n.next/\n__pycache__/\n")
+    except OSError:
+        semgrepignore_path = None
 
     try:
         result = subprocess.run(
@@ -101,6 +141,12 @@ def run_semgrep(repo_path: str, autofix: bool = False) -> Dict[str, Any]:
         return {"available": True, "findings": [], "error": f"semgrep JSON parse error: {e}"}
     except Exception as e:
         return {"available": True, "findings": [], "error": str(e)}
+    finally:
+        if semgrepignore_path and os.path.exists(semgrepignore_path):
+            try:
+                os.remove(semgrepignore_path)
+            except OSError:
+                pass
 
 
 def format_semgrep_findings(findings: List[Dict]) -> str:
@@ -113,7 +159,9 @@ def format_semgrep_findings(findings: List[Dict]) -> str:
         path = f.get("path", "unknown")
         start = f.get("start", {})
         line = start.get("line", "?")
-        msg = f.get("extra", {}).get("message", "").split("\n")[0][:100]
+        msg = _redact_sensitive_text(
+            f.get("extra", {}).get("message", "").split("\n")[0][:100]
+        )
         lines.append(f"  [{rule_id}] {path}:{line} — {msg}")
     return "\n".join(lines)
 
@@ -127,9 +175,11 @@ def semgrep_to_diff(findings: List[Dict], repo_path: str) -> str:
         path = f.get("path", "")
         start_line = f.get("start", {}).get("line", 1)
         end_line = f.get("end", {}).get("line", start_line)
-        msg = f.get("extra", {}).get("message", "").split("\n")[0][:80]
-        fix = f.get("extra", {}).get("fix", "")
-        original = f.get("extra", {}).get("lines", "").strip()
+        msg = _redact_sensitive_text(
+            f.get("extra", {}).get("message", "").split("\n")[0][:80]
+        )
+        fix = _redact_sensitive_text(f.get("extra", {}).get("fix", ""))
+        original = _redact_sensitive_text(f.get("extra", {}).get("lines", "").strip())
 
         lines.append(f"--- a/{path}")
         lines.append(f"+++ b/{path}")
@@ -266,8 +316,8 @@ ENV VAR STATUS:
 
     if db_match:
         engine_context += f"\nDB MATCH (similar past fix, {db_match.get('uses', 0)} uses):\n"
-        engine_context += f"  Pattern: {db_match.get('pattern', '')}\n"
-        engine_context += f"  Signature: {db_match.get('error_signature', '')}\n"
+        engine_context += f"  Pattern: {_redact_sensitive_text(db_match.get('pattern', ''))}\n"
+        engine_context += f"  Signature: {_redact_sensitive_text(db_match.get('error_signature', ''))}\n"
 
     prompt = f"""{engine_context}
 You are a Rocket.new support engineer. Complete the diagnosis and output the fix.
@@ -345,23 +395,26 @@ def report_findings(
                 fix  = f.get("extra", {}).get("fix", "")
                 msg  = f.get("extra", {}).get("message", "").split("\n")[0][:80]
                 print(f"  [{rule}] {path}:{line}", flush=True)
-                print(f"    {msg}", flush=True)
+                print(f"    {_redact_sensitive_text(msg)}", flush=True)
                 if fix:
-                    print(f"    autofix: {fix[:60]}", flush=True)
+                    print(f"    autofix: {_redact_sensitive_text(fix[:60])}", flush=True)
 
         if fs_issues:
             print(INFO(f"File-system: {len(fs_issues)} issue(s):"), flush=True)
             for issue in fs_issues:
                 print(f"  [{issue['rule']}] {issue['message']}", flush=True)
-                print(f"    fix: {issue['fix']}", flush=True)
+                print(f"    fix: {_redact_sensitive_text(issue['fix'])}", flush=True)
 
         if db_match:
             score = db_match.get("_score", 0)
             print(INFO(f"DB match ({score:.0%} similarity): {db_match.get('pattern', '')[:70]}"), flush=True)
-            print(f"  Signature: {db_match.get('error_signature', '')[:80]}", flush=True)
+            print(
+                f"  Signature: {_redact_sensitive_text(db_match.get('error_signature', '')[:80])}",
+                flush=True,
+            )
             diff = db_match.get("fix_diff", "")
             if diff:
-                print(f"\n{diff[:500]}", flush=True)
+                print(f"\n{_redact_sensitive_text(diff[:500])}", flush=True)
 
         print(f"\n{_c('1;33', f'Run:  rkt {repo_name}  for full Claude diagnosis')}", flush=True)
         return True
@@ -469,23 +522,23 @@ def _print_all_findings(
             conf = _classify_confidence(cw, "chain_walker")
             print(f"\n  {_CONF_LABEL[conf]}", flush=True)
             print(f"  [{cw['chain']}] {cw['broken_at']}", flush=True)
-            print(f"  Issue:    {cw['issue']}", flush=True)
+            print(f"  Issue:    {_redact_sensitive_text(cw['issue'])}", flush=True)
             print(f"  Missing:  {cw['missing']}", flush=True)
-            print(f"  Fix:      {cw['fix_hint']}", flush=True)
+            print(f"  Fix:      {_redact_sensitive_text(cw['fix_hint'])}", flush=True)
             # Context window around the break location
             abs_path = os.path.join(repo_path, cw["broken_at"])
             anchor = context_extractor.find_anchor_line(abs_path, cw["missing"])
             ctx = context_extractor.extract_context(abs_path, anchor, window=15)
             block = context_extractor.format_context_block(ctx)
             if block:
-                print(block, flush=True)
+                print(_redact_sensitive_text(block), flush=True)
 
     # 1b. SCHEMA ISSUES — SQL migration checks
     if schema_failures:
         print(f"\n{_c('1;33', f'SCHEMA ISSUES ({len(schema_failures)} missing pattern(s)):')}", flush=True)
         for sf in schema_failures:
             print(f"  [MED ] [SCHEMA] {sf['check']}", flush=True)
-            print(f"    {sf['fix_hint']}", flush=True)
+            print(f"    {_redact_sensitive_text(sf['fix_hint'])}", flush=True)
 
     # 2. ADDITIONAL ISSUES — semgrep violations
     if semgrep_findings:
@@ -499,15 +552,15 @@ def _print_all_findings(
             fix   = f.get("extra", {}).get("fix", "")
             print(f"\n  {_CONF_LABEL[conf]}", flush=True)
             print(f"  [{rule}] {path}:{line}", flush=True)
-            print(f"    {msg}", flush=True)
+            print(f"    {_redact_sensitive_text(msg)}", flush=True)
             if fix:
-                print(f"    autofix: {fix[:70]}", flush=True)
+                print(f"    autofix: {_redact_sensitive_text(fix[:70])}", flush=True)
             # Context window around the violation line
             if isinstance(line, int):
                 ctx = context_extractor.extract_context(path, line, window=10)
                 block = context_extractor.format_context_block(ctx)
                 if block:
-                    print(block, flush=True)
+                    print(_redact_sensitive_text(block), flush=True)
 
     if fs_issues:
         print(f"\n{_c('1;33', f'FILE-SYSTEM ISSUES ({len(fs_issues)}):')}", flush=True)
@@ -515,7 +568,7 @@ def _print_all_findings(
             conf = _classify_confidence(issue, "fs")
             print(f"\n  {_CONF_LABEL[conf]}", flush=True)
             print(f"  [{issue['rule']}] {issue['message']}", flush=True)
-            print(f"    fix: {issue['fix']}", flush=True)
+            print(f"    fix: {_redact_sensitive_text(issue['fix'])}", flush=True)
 
     # 3. KNOWN FIX — database match
     if db_match:
@@ -523,17 +576,20 @@ def _print_all_findings(
         uses_count = db_match.get("uses", 0)
         print(f"\n{_c('1;34', f'KNOWN FIX (database — {score:.0%} similarity, used {uses_count}x):')}", flush=True)
         print(f"  Pattern:   {db_match.get('pattern', '')[:80]}", flush=True)
-        print(f"  Signature: {db_match.get('error_signature', '')[:80]}", flush=True)
+        print(
+            f"  Signature: {_redact_sensitive_text(db_match.get('error_signature', '')[:80])}",
+            flush=True,
+        )
         diff = db_match.get("fix_diff", "")
         if diff:
-            print(f"\n{diff[:400]}", flush=True)
+            print(f"\n{_redact_sensitive_text(diff[:400])}", flush=True)
 
     # 4. RELEVANT DOCS — KB search hits
     if kb_hits:
         print(f"\n{_c('1;36', 'RELEVANT DOCS (kb_search):')}", flush=True)
         for hit in kb_hits:
             print(f"  [{hit['source']}]  score={hit['score']:.3f}", flush=True)
-            print(f"  {hit['chunk'][:400]}", flush=True)
+            print(f"  {_redact_sensitive_text(hit['chunk'][:400])}", flush=True)
 
     print(f"\n{_c('1;33', f'Run:  rkt {repo_name}  for full Claude diagnosis')}", flush=True)
 
@@ -624,6 +680,14 @@ def diagnose(repo_path: str, hint: str = "") -> Dict[str, Any]:
                f"Next.js {fingerprint_result.get('next_version', '?')} | "
                f"Supabase: {fingerprint_result['has_supabase']} | "
                f"Stripe: {fingerprint_result['has_stripe']}"), flush=True)
+    if fingerprint_result.get("used_fallback"):
+        print(
+            WARN(
+                "fingerprint used heuristic fallback "
+                f"({fingerprint_result.get('fallback_reason', 'low signal')})"
+            ),
+            flush=True,
+        )
     print(INFO(f"Most likely failure: {fingerprint_result['common_failure']}"), flush=True)
 
     # ── Layer 1: Semgrep ──────────────────────────────────────────────────────

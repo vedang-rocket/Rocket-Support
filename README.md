@@ -1,263 +1,256 @@
 # Rocket-Support — rkt
 
-One command. Clone → diagnose → fix. Under 60 seconds.
+Three commands. Unzip → triage → fix → deliver. Under 60 seconds.
 
-Built for Rocket.new support engineers. Diagnoses client repos automatically using a 6-layer engine — no manual code reading required.
+Built for Rocket.new support engineers. Unzip a client project, get a root cause diagnosis, apply fixes automatically or via Cursor/Claude, then deliver a clean zip back to the client.
 
 ---
 
-## Install (one command)
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vedang-rocket/Rocket-Support/main/install.sh | bash
 ```
 
-Installs everything in under 2 minutes. Idempotent — safe to run multiple times.
+Installs in under 2 minutes. Idempotent — safe to run multiple times.
 
-### What it installs
-
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| `rkt` | `~/rocket-support/bin/rkt` | Diagnose any client repo |
-| `rkt-main` | `~/rocket-support/bin/rkt-main` | Full project setup (11 steps) |
-| Python engine | `~/rocket-support/engine/` | 6-layer fix pipeline |
-| brain.db | `~/.rocket-support/brain.db` | Learned fix pattern database |
-| Global hooks | `~/.claude/hooks/` | Claude Code automation |
-| Global skills | `~/.claude/skills/` | `/think` `/graph` `/memory` `/ux` `/review` |
-| KB docs | `~/rocket-support/kb/` | Live Supabase + Next.js + Stripe docs |
-
-### Requirements
-
-- macOS (Apple Silicon or Intel)
-- Python 3.9+
-- Node.js 18+
-- Claude Code (`npm install -g @anthropic-ai/claude-code`)
-- SSH access to client GitHub repos
+**Requirements:** macOS · Python 3.9+ · Node.js 18+ · bun · Claude Code (`npm install -g @anthropic-ai/claude-code`)
 
 ---
 
-## Commands
+## Three Commands
 
-### Diagnose a client repo
+### `rkt-crazy` — Full pipeline (triage + Cursor setup + fix)
 
 ```bash
-rkt cliently
+rkt-crazy ~/Downloads/client.zip "auth broken after login"
+rkt-crazy ~/Downloads/client.zip "dashboard blank" --fast   # skip Cursor setup
 ```
 
-Clones the repo, switches to the most recently updated branch, runs the full 6-layer engine, outputs findings with confidence scoring and code context.
+Runs all three phases end to end. Use this for new client projects.
 
-### Full project setup
+---
+
+### `rkt-triage` — Fast pipeline (triage + fix, no Cursor setup)
 
 ```bash
-rkt-main cliently
+rkt-triage ~/Downloads/client.zip "stripe webhook 400"
 ```
 
-Runs all 11 setup steps: clone → latest branch → v34 Cursor rules → Graphify → UI/UX Pro Max → global skills → MCP servers → CLAUDE.md → code-review-graph → Obsidian vault → RuFlo → .gitignore. Then runs full diagnosis.
+Same triage + fix menu as `rkt-crazy`, but skips Phase 2 (Cursor rule installation). Use this when the project is already set up or you just want a fast diagnosis.
 
-### Use any GitHub URL
+---
+
+### `rkt-deliver` — Package and deliver
 
 ```bash
-rkt git@github.com:VedangP57/Cliently.git
-rkt-main git@github.com:VedangP57/Cliently.git
+rkt-deliver
 ```
 
-### Use a local folder (no GitHub needed)
+Learns from your changes, strips all tooling artifacts, and zips the fixed project to `~/Downloads/` for delivery.
 
-```bash
-rkt ~/Downloads/clientproject
-rkt-main ~/Downloads/clientproject
-rkt-main --local /path/to/project
+---
+
+## How It Works
+
 ```
+rkt-crazy ~/Downloads/client.zip "issue"
 
-### Modifiers
+  PHASE 1 — TRIAGE                          (~13 seconds)
+  ├─ Unzip → flatten → snapshot → workspace
+  ├─ bun install
+  └─ 6-layer engine: chain_walker → schema → fingerprint
+                     → semgrep → fix_database → kb_search
+     Outputs: root cause, confidence %, recommended fix mode
 
-```bash
-rkt-main cliently --force        # redo all 11 steps
-rkt-main cliently --no-diagnose  # setup only, skip diagnosis
+  PHASE 2 — CURSOR SETUP                    (~45 seconds, skip with --fast)
+  └─ rkt-main --no-diagnose on workspace:
+     61 Cursor rules · Graphify · UI/UX Pro Max · skills
+     MCPs · CLAUDE.md · code-review-graph · Obsidian · RuFlo
+
+  PHASE 3 — FIX MODE MENU                   (your choice)
+  └─ Pre-selected from triage recommendation
+     [1] AUTO · [2] GUIDED · [3] CLAUDE · [4] MANUAL
 ```
 
 ---
 
-## What Gets Installed Per Project
+## Fix Modes
 
-Every `rkt-main` run installs these into the client project:
+| Mode | What it does |
+|------|-------------|
+| **AUTO** | Applies all high-confidence fixes with `--yes --non-interactive`. No prompts. Run `rkt-deliver` when done. |
+| **GUIDED** | Writes `.rkt_prompt.md` to the workspace (triage findings as a ready-to-paste Cursor prompt), then opens Cursor. Open the file, paste into Cursor chat, press Enter. |
+| **CLAUDE** | Launches `claude --dangerously-skip-permissions` in the workspace. Full agentic fix. Run `rkt-deliver` when Claude exits. |
+| **MANUAL** | Interactive per-file review via `rkt_smart.py`. Shows each diff, you approve or skip. |
 
-**For Claude Code:**
-- 6 skills: `/think` `/graph` `/memory` `/ux` `/review` `/obsidian`
-- 5 MCPs: context7, sequential-thinking, memory, playwright, code-review-graph
-- RuFlo V3 daemon (15 agents, hierarchical-mesh swarm, vector memory)
-- Global hooks: tsc-check, chain-walker guard, graphify, UX detector
-- Project-specific CLAUDE.md with engine intelligence
+### GUIDED mode — step by step
 
-**For Cursor:**
-- 61 v34 Cursor rules
-- 40 commands
-- UI/UX Pro Max skills
-- 4 MCPs in `.cursor/mcp.json`
-- Graphify context graph
+When you select GUIDED, Cursor opens automatically with `.rkt_prompt.md` in the workspace root:
+
+```
+In Cursor:
+  1. Open file: .rkt_prompt.md
+  2. Select all text (Cmd+A)
+  3. Paste into Cursor chat
+  4. Press Enter
+```
+
+The prompt contains: issue description, category, confidence, all findings with source and fix mode, and the 7 Rocket.new hard rules.
 
 ---
 
-## The 6-Layer Engine
+## The Engine (6 Layers)
 
-Runs automatically on every `rkt` or `rkt-main` call:
+Runs automatically during triage on every client project:
 
 ```
 Layer 0:  chain_walker     → Cross-file structural breaks (AUTH, STRIPE, RLS, ENV)
-Layer 0b: schema_checker   → SQL migration audit (triggers, RLS, CASCADE, TIMESTAMPTZ)
+Layer 0b: schema_checker   → SQL migration audit (TIMESTAMPTZ, triggers, RLS, CASCADE)
 Layer 1:  fingerprint      → Project type (SaaS, E-Commerce, AI, Booking, Landing, Blog)
 Layer 2:  Semgrep          → AST-level autofix scan (7 Rocket.new-specific rules)
-Layer 3:  Fix database     → Vector similarity search (learns from every fix)
-Layer 4:  KB search        → Live Supabase, Next.js, Stripe docs injected
+Layer 3:  Fix database     → Vector similarity search in brain.db
+Layer 4:  KB search        → Supabase, Next.js, Stripe docs injected as context
 ```
 
-Every finding is rated **[HIGH]** / **[MED]** / **[LOW]** confidence and shown with a 30-line code context window.
+Every finding is scored **HIGH / MED / LOW** confidence before a fix is proposed.
 
-### Sample output
+### Confidence → action
 
-```
-── Layer 0: chain_walker ──
-  [AUTH] src/middleware.ts: updateSession missing
+| Confidence | Meaning | Behaviour in AUTO mode |
+|-----------|---------|----------------------|
+| HIGH | Single string replacement, import swap | Applied automatically |
+| MED | Adding export, function change | Applied with warning |
+| LOW | Middleware restructure, template replacement | Diff shown only — **never auto-applied** |
 
-── Layer 0b: schema_checker ──
-  [SCHEMA] Bare TIMESTAMP columns — replace with TIMESTAMPTZ
+> Middleware (`middleware-missing-updatesession`) is always `PREVIEW_ONLY`. The canonical template destroys custom route logic, so it is never written automatically.
 
-── Layer 2: Semgrep — 21 violation(s) ──
-  [MED] supabase-js-in-server-file → src/app/api/admin/users/route.ts:2
-  [MED] supabase-missing-dynamic-export → src/app/dashboard/page.tsx:162
+### Semgrep rules (7)
 
-── Layer 3: Fix database — 81% match ──
-  Pattern: request.json() in Stripe webhook handler
-  Autofix: const body = await request.text()
-
-── KB search — 2 chunks ──
-  [supabase_ssr]  Supabase SSR cookie refresh pattern
-  [supabase_rls]  RLS policy with auth.uid()
-```
-
----
-
-## The 10 Hard Rules (v34)
-
-Violations are caught automatically by the engine:
-
-1. `getUser()` not `getSession()` in server code
-2. `request.text()` not `request.json()` in Stripe webhooks
-3. `middleware.ts` at project root — never inside `/app`
-4. `@supabase/ssr` only — never `@supabase/auth-helpers-nextjs`
-5. `await cookies()` required in Next.js 15
-6. Never `NEXT_PUBLIC_` prefix on service role or secret keys
-7. Never `// ... existing code ...` in diffs
-8. Always `export const dynamic = 'force-dynamic'` on authenticated pages
-9. Social OAuth never works on localhost
-10. Post-Nov 2025 Supabase projects use `sb_publishable_` key format
-
----
-
-## Confidence Scoring
-
-Every fix is rated before being applied:
-
-| Level | Meaning | Action |
-|-------|---------|--------|
-| `[HIGH]` | Single string replacement, import swap | Auto-applied |
-| `[MED]` | Adding export, function change | Applied with warning |
-| `[LOW]` | Middleware restructure, file move | Diff shown only — apply manually |
+| Rule | Catches |
+|------|---------|
+| `supabase-getsession-not-getuser` | `.auth.getSession()` in server code |
+| `stripe-webhook-request-json` | `request.json()` in Stripe webhook handler |
+| `stripe-webhook-req-json-var` | Variable-form `req.json()` in webhook |
+| `supabase-js-in-server-file` | `@supabase/supabase-js` import in server file |
+| `supabase-missing-dynamic-export` | Missing `force-dynamic` on authenticated page |
+| `middleware-missing-updatesession` | `middleware.ts` without `updateSession` |
+| `schema-timestamptz` | Bare `TIMESTAMP` column in SQL migration |
 
 ---
 
 ## brain.db — The Learning Database
 
-Every fix gets saved to `~/.rocket-support/brain.db`. Similarity improves with every run.
+Every fix run saves patterns to `~/.rocket-support/brain.db`. The database improves with every client project.
 
 ```bash
-# Check what's been learned
-source ~/rocket-support/engine/.venv/bin/activate
+# Check what has been learned
 python3 ~/rocket-support/engine/rkt_smart.py --db-stats
 ```
 
 ```
-Category     Uses   Pattern
-AUTH         7      middleware.ts missing updateSession()
-STRIPE       3      request.json() in webhook handler
-SUPABASE     3      Missing RLS, missing profile trigger
-ENV          1      NEXT_PUBLIC_ on service role key
+Fix database: ~/.rocket-support/brain.db
+Total fixes:  12
+
+Category     Uses   V   Pattern
+AUTH         7      ✓   middleware.ts missing updateSession()
+STRIPE       3      ✓   request.json() in webhook handler
+SUPABASE     3      ✓   Missing RLS, missing profile trigger
+ENV          1          NEXT_PUBLIC_ on service role key
 ```
+
+`rkt-deliver` automatically saves any manual fixes made in GUIDED or CLAUDE mode back to brain.db.
 
 ---
 
-## Knowledge Base
+## rkt-deliver Cleanup
 
-Live documentation fetched from GitHub raw sources. Searched on every diagnosis run.
+Before zipping, `rkt-deliver` strips all tooling artifacts from the workspace:
+
+**Directories removed:**
+`.rkt_snapshot` · `node_modules` · `.next` · `.claude` · `.cursor` · `.swarm` · `.claude-flow` · `memory-bank` · `graphify-out` · `code-review-graph` · `.code-review-graph`
+
+**Files removed:**
+`CLAUDE.md` · `AGENTS.md` · `.mcp.json` · `the-rocket-guide.md` · `TROUBLESHOOTING.md` · `.rkt_meta.json` · `.rkt_prompt.md` · `ruvector.db` · `ruvector.db-shm` · `ruvector.db-wal` · `*.rkt_backup`
+
+The output zip lands at `~/Downloads/<projectname>_fixed_<timestamp>.zip`.
+
+---
+
+## Commands Reference
+
+### Primary workflow
 
 ```bash
-# Refresh weekly
-~/rocket-support/engine/kb/refresh.sh
+rkt-crazy <project.zip> ["issue"]           # full pipeline
+rkt-crazy <project.zip> ["issue"] --fast    # skip Cursor setup
+rkt-triage <project.zip> ["issue"]          # triage + fix only
+rkt-deliver                                 # package and deliver
 ```
 
-Sources: Supabase SSR guide, Supabase RLS docs, Next.js middleware, Next.js cookies(), Next.js 15 upgrade guide.
-
----
-
-## SSH Setup for Client Repos
-
-Add to `~/.ssh/config`:
-
-```
-Host github-rocket
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/your_key
-```
-
-Test: `ssh -T git@github-rocket`
-
-For any GitHub URL:
-```bash
-rkt git@github.com:OrgName/repo.git
-```
-Requires your SSH key to be authorized on that GitHub account.
-
----
-
-## For Cursor Users
-
-`rkt-main` installs to both Claude Code and Cursor automatically:
-
-- `.cursor/rules/` — 61 v34 rules
-- `.cursor/commands/` — 40 commands
-- `.cursor/skills/` — UI/UX Pro Max
-- `.cursor/mcp.json` — 4 MCP servers
-- `.cursor/rules/graphify.mdc` — code graph context
-
-Claude Code hooks and `rkt` diagnosis require Claude Code CLI.
-
----
-
-## Updating
+### Project setup only
 
 ```bash
-cd ~/rocket-support && git pull
-# or re-run installer (idempotent):
-bash ~/rocket-support/install.sh
+rkt-main <project-name>                     # clone from GitHub + full 11-step setup
+rkt-main --local /path/to/project           # local folder + full setup
+rkt-main /path/to/project                   # shorthand for --local
+rkt-main <project-name> --no-diagnose       # setup only, skip fix scan
+rkt-main <project-name> --force             # redo all 11 steps
+rkt-main <project-name> --yes               # auto-apply all fixes
+rkt-main <project-name> --preview-only      # show diffs, write nothing
 ```
 
----
+### Diagnosis only
 
-## Maintenance
+```bash
+python3 ~/rocket-support/engine/rkt_smart.py <path>                    # interactive
+python3 ~/rocket-support/engine/rkt_smart.py <path> --yes              # auto-apply
+python3 ~/rocket-support/engine/rkt_smart.py <path> --preview-only     # diff only
+python3 ~/rocket-support/engine/rkt_smart.py <path> --fingerprint-only # type detection
+python3 ~/rocket-support/engine/rkt_smart.py --db-stats                # brain.db stats
+python3 ~/rocket-support/engine/rkt_smart.py --seed-db                 # seed built-in patterns
+```
+
+### Workspace management
+
+```bash
+# List all workspaces
+python3 -c "
+import sys; sys.path.insert(0,'~/rocket-support/engine')
+import workspace as w
+for m in w.list_workspaces(): print(m['workspace_name'], m['workspace_path'])
+"
+```
+
+### Maintenance
 
 ```bash
 # Refresh KB docs
 ~/rocket-support/engine/kb/refresh.sh
 
-# Check brain.db learnings
-source ~/rocket-support/engine/.venv/bin/activate
-python3 ~/rocket-support/engine/rkt_smart.py --db-stats
-
 # Backup everything
 cd ~ && zip -r ~/Downloads/rkt-backup-$(date +%Y%m%d).zip \
   rocket-support/ .rocket-support/brain.db \
   .claude/settings.json .claude/mcp.json \
-  .claude/hooks/ .claude/skills/ \
   --exclude "rocket-support/engine/.venv/*"
+
+# Update
+cd ~/rocket-support && git pull
 ```
+
+---
+
+## The 10 Hard Rules
+
+Violations caught automatically by the engine. Never violate these in a fix:
+
+1. `getUser()` not `getSession()` in server code — getSession() doesn't validate JWT
+2. `request.text()` not `request.json()` in Stripe webhook handlers
+3. `middleware.ts` at project root — never inside `/app`
+4. `@supabase/ssr` only — never `@supabase/auth-helpers-nextjs` (deprecated)
+5. `await cookies()` required in Next.js 15 — not optional
+6. Never `NEXT_PUBLIC_` prefix on service role or secret keys
+7. Never produce `// ... existing code ...` in diffs — Lazy Delete bug
+8. Always `export const dynamic = 'force-dynamic'` on authenticated pages
+9. Social OAuth never works on localhost — test on deployed URL only
+10. Post-Nov 2025 Supabase projects use `sb_publishable_` key format, not `anon_key`

@@ -7,8 +7,11 @@ description: >
   next build TypeScript error, environment variable undefined in production netlify,
   SPA routing 404 on page refresh, image optimization error Invalid src prop hostname,
   API route 404 production not local, stripe test vs live key wrong environment,
-  missing stripe webhook secret, checkout session creation failed
-globs: ["**/*.ts", "**/*.tsx", "**/*.js"]
+  missing stripe webhook secret, checkout session creation failed,
+  preview broken CSP content security policy blocked next.config, preview deployment issues,
+  script blocked unsafe-eval unsafe-inline refused to load, connect-src blocked supabase,
+  Content-Security-Policy violation, preview works localhost broken on deploy
+globs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/next.config*"]
 alwaysApply: false
 ---
 
@@ -98,3 +101,55 @@ export async function POST(request: Request) {
 // Check RESEND_API_KEY is set in Netlify env vars
 // Test in production by checking email provider dashboard logs
 ```
+
+---
+
+### Preview broken / scripts blocked / CSP violation in next.config
+**Cause**: Content Security Policy headers in `next.config.ts` are missing required domains for Supabase, analytics, and Rocket.new preview URLs. Browser console shows `Refused to load script` or `connect-src` errors.
+
+**Root file**: `next.config.ts` (or `next.config.js`) — the `headers()` function
+
+```typescript
+// ✅ FIX — ensure these directives are in your CSP headers() block in next.config.ts
+
+const securityHeaders = [
+  {
+    key: 'Content-Security-Policy',
+    value: [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com https://pagead2.googlesyndication.com https://static.rocket.new",
+      "script-src-elem 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com https://pagead2.googlesyndication.com https://static.rocket.new",
+      "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.openai.com https://bws.bioid.com https://*.bioid.com https://api.tryterra.co https://appanalytics.rocket.new",
+      "img-src 'self' data: blob: https:",
+      "font-src 'self' https://fonts.gstatic.com",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "frame-src 'self'",
+    ].join('; '),
+  },
+]
+
+// In next.config.ts:
+const nextConfig = {
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: securityHeaders,
+      },
+    ]
+  },
+}
+```
+
+**Quick diagnosis**: Open browser DevTools → Console tab → look for:
+- `Refused to load script from '...'` → missing from `script-src`
+- `has been blocked by CORS policy` → missing from `connect-src`
+- `refused to connect` (WebSocket) → missing `wss://` in `connect-src`
+
+**Most common missing entries by symptom**:
+| Symptom | Add to CSP |
+|---|---|
+| Supabase realtime broken | `wss://*.supabase.co` in connect-src |
+| Google Analytics not firing | `https://www.googletagmanager.com` in script-src |
+| OpenAI calls blocked | `https://api.openai.com` in connect-src |
+| Rocket preview banner missing | `https://static.rocket.new` in script-src |
