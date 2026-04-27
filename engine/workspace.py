@@ -70,6 +70,16 @@ def _read_text(path: str) -> str:
         return ""
 
 
+def _is_zip_noise_entry(name: str) -> bool:
+    """Return True for extraction artifacts that should not affect root detection."""
+    lowered = name.lower()
+    return (
+        lowered == "__macosx"
+        or lowered.startswith(".ds_store")
+        or lowered.startswith("._")
+    )
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_port(workspace_path: str) -> int:
@@ -122,10 +132,12 @@ def create_workspace(zip_path: str, issue_description: str) -> Dict[str, Any]:
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(temp_path)
 
-    # 2. Hoist if single subfolder was extracted
+    # 2. Hoist if archive has one real project root.
+    # Some zips contain __MACOSX alongside the app folder; ignore those artifacts.
     entries = [e for e in os.listdir(temp_path) if not e.startswith(".")]
-    if len(entries) == 1:
-        inner = os.path.join(temp_path, entries[0])
+    real_entries = [e for e in entries if not _is_zip_noise_entry(e)]
+    if len(real_entries) == 1:
+        inner = os.path.join(temp_path, real_entries[0])
         if os.path.isdir(inner):
             for item in os.listdir(inner):
                 shutil.move(os.path.join(inner, item), temp_path)

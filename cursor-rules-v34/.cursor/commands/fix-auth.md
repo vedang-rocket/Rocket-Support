@@ -22,7 +22,23 @@ Rationale: Accuracy degrades ~2% per reasoning step. At 20 steps, failure rate c
 ---
 ## My diagnostic sequence — I will follow this exactly
 
-**Step 0 — MCP Live Diagnostics (run BEFORE reading any code)**
+**Step 0 — File existence check (run BEFORE anything else)**
+
+Check every auth file location. Edit existing files — never create duplicates.
+
+```bash
+echo "=== MIDDLEWARE ===" && ls middleware.ts src/middleware.ts 2>/dev/null || echo "not found"
+echo "=== SESSION/MIDDLEWARE LIB ===" && ls lib/supabase/middleware.ts lib/supabase/session.ts src/lib/supabase/middleware.ts src/lib/supabase/session.ts 2>/dev/null || echo "not found"
+echo "=== SERVER/CLIENT ===" && ls lib/supabase/server.ts lib/supabase/client.ts src/lib/supabase/server.ts src/lib/supabase/client.ts 2>/dev/null || echo "not found"
+echo "=== AUTH CONTEXT ===" && ls contexts/AuthContext.tsx context/AuthContext.tsx src/contexts/AuthContext.tsx 2>/dev/null || echo "not found"
+echo "=== CALLBACK ===" && ls app/auth/callback/route.ts src/app/auth/callback/route.ts 2>/dev/null || echo "not found"
+```
+
+From this output, establish the canonical paths for this project — e.g. `src/middleware.ts`, `src/lib/supabase/session.ts`. Use ONLY these paths in all subsequent steps. Do not create any file that already appears in this output.
+
+---
+
+**Step 0b — MCP Live Diagnostics (run BEFORE reading any code)**
 
 If Supabase MCP is connected, run these immediately and report results:
 ```sql

@@ -191,6 +191,28 @@ WORKSPACE_PATH=$(echo "$WORKSPACE_JSON" | "$PYTHON" -c "import sys,json; print(j
 WORKSPACE_NAME=$(echo "$WORKSPACE_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['workspace_name'])")
 PORT=$(echo "$WORKSPACE_JSON"           | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['port'])")
 
+# Detect effective app root (handles nested extraction wrappers).
+EFFECTIVE_WORKSPACE_PATH=$("$PYTHON" - "$WORKSPACE_PATH" <<'PYEOF'
+import os, sys
+root = sys.argv[1]
+if os.path.isfile(os.path.join(root, "package.json")):
+    print(root)
+    sys.exit(0)
+try:
+    children = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+except Exception:
+    print(root)
+    sys.exit(0)
+matches = [os.path.join(root, d) for d in children if os.path.isfile(os.path.join(root, d, "package.json"))]
+print(matches[0] if len(matches) == 1 else root)
+PYEOF
+)
+
+[[ -z "$EFFECTIVE_WORKSPACE_PATH" ]] && EFFECTIVE_WORKSPACE_PATH="$WORKSPACE_PATH"
+if [[ "$EFFECTIVE_WORKSPACE_PATH" != "$WORKSPACE_PATH" ]]; then
+    info "Detected effective app root: $EFFECTIVE_WORKSPACE_PATH"
+fi
+
 ok "Workspace: $WORKSPACE_NAME"
 ok "Path:      $WORKSPACE_PATH"
 ok "Port:      $PORT"
@@ -199,9 +221,9 @@ ok "Port:      $PORT"
 
 section "Phase 1 / Triage — Step 2/3  Installing dependencies"
 
-if command -v bun &>/dev/null && [[ -f "$WORKSPACE_PATH/package.json" ]]; then
+if command -v bun &>/dev/null && [[ -f "$EFFECTIVE_WORKSPACE_PATH/package.json" ]]; then
     spinner_start "bun install"
-    bun install --cwd "$WORKSPACE_PATH" --silent 2>/dev/null
+    bun install --cwd "$EFFECTIVE_WORKSPACE_PATH" --silent 2>/dev/null
     BUN_EXIT=$?
     spinner_stop
     if [[ $BUN_EXIT -eq 0 ]]; then
@@ -209,7 +231,7 @@ if command -v bun &>/dev/null && [[ -f "$WORKSPACE_PATH/package.json" ]]; then
     else
         warn "bun install exited $BUN_EXIT — continuing"
     fi
-elif [[ ! -f "$WORKSPACE_PATH/package.json" ]]; then
+elif [[ ! -f "$EFFECTIVE_WORKSPACE_PATH/package.json" ]]; then
     warn "No package.json found — skipping bun install"
 else
     warn "bun not found — skipping install (install from https://bun.sh)"
@@ -220,10 +242,10 @@ fi
 section "Phase 1 / Triage — Step 3/3  Running triage pipeline"
 info "Analyzing project..."
 
-TRIAGE_SUMMARY=$("$PYTHON" "$ENGINE_DIR/run_triage.py" \
-    "$WORKSPACE_PATH" "$ISSUE_DESC" "$PORT" 2>/dev/null)
+TRIAGE_STDOUT=$("$PYTHON" "$ENGINE_DIR/run_triage.py" \
+    "$EFFECTIVE_WORKSPACE_PATH" "$ISSUE_DESC" "$PORT" 2>/dev/null)
 
-if [[ $? -ne 0 || -z "$TRIAGE_SUMMARY" ]]; then
+if [[ $? -ne 0 || "$TRIAGE_STDOUT" != *"__TRIAGE_OK__"* ]]; then
     fail "run_triage.py failed"
 fi
 
@@ -236,8 +258,6 @@ RECOMMENDED_MODE=$(  "$PYTHON" -c "import sys,json; print(json.load(open('$RESUL
 CONFIDENCE=$(        "$PYTHON" -c "import sys,json; print(f\"{json.load(open('$RESULT_FILE'))['overall_confidence']:.0%}\")")
 AUTO_COUNT=$(        "$PYTHON" -c "import sys,json; print(json.load(open('$RESULT_FILE'))['auto_fixable_count'])")
 
-echo ""
-echo "$TRIAGE_SUMMARY"
 ok "Triage complete  (confidence: ${CONFIDENCE}, ${AUTO_COUNT} auto-fixable, recommended: ${RECOMMENDED_MODE})"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -250,14 +270,14 @@ if $FAST; then
 else
     section "Phase 2 / Setup  Running rkt-main on workspace"
     info "Installing: Cursor rules, Graphify, UI/UX Pro Max, skills, MCPs, CLAUDE.md, code-review-graph, Obsidian, RuFlo"
-    info "Workspace: $WORKSPACE_PATH"
+    info "Workspace: $EFFECTIVE_WORKSPACE_PATH"
     echo ""
 
     RKT_MAIN="$RKT_HOME/bin/rkt-main"
     if [[ ! -x "$RKT_MAIN" ]]; then
         warn "rkt-main not found at $RKT_MAIN — skipping setup"
     else
-        "$RKT_MAIN" "$WORKSPACE_PATH" --no-diagnose
+        RKT_SKIP_SEMGREP=1 "$RKT_MAIN" "$EFFECTIVE_WORKSPACE_PATH" --no-diagnose
         SETUP_EXIT=$?
         echo ""
         if [[ $SETUP_EXIT -eq 0 ]]; then
@@ -272,38 +292,16 @@ fi
 #  PHASE 3 — FIX MODE MENU
 # ══════════════════════════════════════════════════════════════════════════════
 
-section "Phase 3 / Fix Mode"
-echo -e "  Recommended: ${BOLD}${CYAN}${RECOMMENDED_MODE}${NC}  (confidence ${CONFIDENCE}, ${AUTO_COUNT} auto-fixable)"
-echo ""
-
-MENU_OPTIONS=(
-    "AUTO    — apply all high-confidence fixes automatically"
-    "GUIDED  — open Cursor at workspace path"
-    "CLAUDE  — launch Claude Code in workspace"
-    "MANUAL  — show diffs, I decide per file"
-)
-
-case "$RECOMMENDED_MODE" in
-    AUTO)   DEFAULT_IDX=0 ;;
-    GUIDED) DEFAULT_IDX=1 ;;
-    CLAUDE) DEFAULT_IDX=2 ;;
-    MANUAL) DEFAULT_IDX=3 ;;
-    *)      DEFAULT_IDX=3 ;;
+# Rich fix-mode menu — renders UI to /dev/tty, prints chosen mode to stdout
+CHOSEN_MODE=$("$PYTHON" "$ENGINE_DIR/format_output.py" fix-mode-menu \
+    --recommended "$RECOMMENDED_MODE" \
+    --confidence "$CONFIDENCE" \
+    --auto-count "$AUTO_COUNT" 2>/dev/null | tail -n 1)
+# Safety fallback if helper failed
+case "$CHOSEN_MODE" in
+    AUTO|GUIDED|CLAUDE|MANUAL) ;;
+    *) CHOSEN_MODE="$RECOMMENDED_MODE" ;;
 esac
-
-SELECTED_IDX=$(select_option_with_default "$DEFAULT_IDX" "${MENU_OPTIONS[@]}")
-
-case $SELECTED_IDX in
-    0) CHOSEN_MODE="AUTO"   ;;
-    1) CHOSEN_MODE="GUIDED" ;;
-    2) CHOSEN_MODE="CLAUDE" ;;
-    3) CHOSEN_MODE="MANUAL" ;;
-    *) CHOSEN_MODE="MANUAL" ;;
-esac
-
-echo ""
-ok "Selected: ${BOLD}${CHOSEN_MODE}${NC}"
-echo ""
 
 # ── Execute fix mode ──────────────────────────────────────────────────────────
 
@@ -312,13 +310,13 @@ case "$CHOSEN_MODE" in
     AUTO)
         info "Running rkt_smart.py with --yes --non-interactive..."
         RETRIAGE_TS=$(date +%s)
-        "$PYTHON" "$ENGINE_DIR/rkt_smart.py" "$WORKSPACE_PATH" \
-            --yes --non-interactive
+        "$PYTHON" "$ENGINE_DIR/rkt_smart.py" "$EFFECTIVE_WORKSPACE_PATH" \
+            --yes --non-interactive --skip-semgrep
         echo ""
         # Collect files modified during the fix run, then re-triage them
         FIXED_FILES_JSON=$("$PYTHON" -c "
 import os, json, time
-ws = '$WORKSPACE_PATH'
+ws = '$EFFECTIVE_WORKSPACE_PATH'
 ts = $RETRIAGE_TS
 files = []
 for root, dirs, fnames in os.walk(ws):
@@ -333,7 +331,7 @@ for root, dirs, fnames in os.walk(ws):
                 pass
 print(json.dumps(files))
 ")
-        "$PYTHON" "$ENGINE_DIR/retriage.py" "$WORKSPACE_PATH" "$FIXED_FILES_JSON" "$ISSUE_DESC"
+        "$PYTHON" "$ENGINE_DIR/retriage.py" "$EFFECTIVE_WORKSPACE_PATH" "$FIXED_FILES_JSON" "$ISSUE_DESC"
         echo ""
         echo -e "  ${GREEN}${BOLD}Fixes applied.${NC} Run: ${CYAN}rkt-deliver${NC} to package and deliver"
         ;;
@@ -344,7 +342,7 @@ print(json.dumps(files))
 import json, os
 
 result_file = "/tmp/rkt_triage_result.json"
-workspace = "$WORKSPACE_PATH"
+workspace = "$EFFECTIVE_WORKSPACE_PATH"
 
 try:
     data = json.load(open(result_file))
@@ -397,7 +395,7 @@ print(f"Prompt written to {prompt_path}")
 PYEOF
 
         # Open Cursor
-        /usr/local/bin/cursor "$WORKSPACE_PATH"
+        /usr/local/bin/cursor "$EFFECTIVE_WORKSPACE_PATH"
 
         echo ""
         echo -e "  \033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
@@ -418,23 +416,23 @@ PYEOF
         info "Launching Claude Code (headless)..."
         echo -e "  ${YELLOW}When done, type /exit and then run: ${CYAN}rkt-deliver${NC}"
         echo ""
-        cd "$WORKSPACE_PATH" && claude --dangerously-skip-permissions
+        cd "$EFFECTIVE_WORKSPACE_PATH" && claude --dangerously-skip-permissions
         echo ""
         echo -e "  When done, run: ${CYAN}rkt-deliver${NC}"
         ;;
 
     MANUAL)
         info "Starting interactive review..."
-        "$PYTHON" "$ENGINE_DIR/rkt_smart.py" "$WORKSPACE_PATH"
+        "$PYTHON" "$ENGINE_DIR/rkt_smart.py" "$EFFECTIVE_WORKSPACE_PATH" --skip-semgrep
         ;;
 
 esac
 
 # ── Handoff report + AI prompt ────────────────────────────────────────────────
-"$PYTHON" "$ENGINE_DIR/handoff.py" "$WORKSPACE_PATH" "$ISSUE_DESC"
+"$PYTHON" "$ENGINE_DIR/handoff.py" "$EFFECTIVE_WORKSPACE_PATH" "$ISSUE_DESC"
 
 echo ""
 echo -e "  ${BOLD}Workspace${NC}"
-echo -e "  ${BLUE}▸${NC} cd   ${CYAN}$WORKSPACE_PATH${NC}"
-echo -e "  ${BLUE}▸${NC} open ${CYAN}$WORKSPACE_PATH${NC}"
+echo -e "  ${BLUE}▸${NC} cd   ${CYAN}$EFFECTIVE_WORKSPACE_PATH${NC}"
+echo -e "  ${BLUE}▸${NC} open ${CYAN}$EFFECTIVE_WORKSPACE_PATH${NC}"
 echo ""

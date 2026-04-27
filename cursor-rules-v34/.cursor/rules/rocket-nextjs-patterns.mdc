@@ -8,8 +8,10 @@ description: >
   nextjs caching strategy performance, revalidateTag nextjs supabase pattern,
   server action supabase auth protected, nextjs route handler vs server action,
   nextjs 15.2 searchParams Promise async await, generateStaticParams supabase database paths,
-  dynamicIO dynamicParams nextjs advanced caching, middleware chaining multiple middlewares
-globs: ["**/*.ts", "**/*.tsx", "**/app/**"]
+  dynamicIO dynamicParams nextjs advanced caching, middleware chaining multiple middlewares,
+  src middleware.ts location next.js src directory structure, next.config.mjs rocket project settings,
+  force-dynamic when to use client-side data fetching no force-dynamic needed
+globs: ["**/*.ts", "**/*.tsx", "**/app/**", "**/src/**"]
 alwaysApply: false
 ---
 
@@ -182,13 +184,19 @@ revalidateTag('products')       // all getProductCatalog calls refetch
 
 ### What NEVER to cache (auth-dependent routes)
 ```typescript
-// ❌ NEVER cache pages that read user-specific data
+// ❌ NEVER cache pages that read user-specific data server-side
 export const revalidate = 60         // breaks with Supabase auth
 export const dynamic = 'force-static' // breaks with Supabase auth
 
-// ✅ Always force dynamic for authenticated routes
+// ✅ Add force-dynamic on Server Components that call supabase.auth.getUser()
 export const dynamic = 'force-dynamic'
 ```
+
+> **When force-dynamic is NOT needed**: If a page is client-rendered (has `'use client'` or is
+> a Client Component using `useAuth()` / `useEffect`), it's already dynamic — do NOT add
+> `force-dynamic` to those files. Only add it to Server Components that read auth server-side.
+> Many Rocket projects (especially CRM / dashboard apps) do all data fetching client-side
+> and need zero `force-dynamic` directives.
 
 ---
 
@@ -394,6 +402,11 @@ export default async function DashboardPage() {
 ---
 
 ## Middleware Chaining Pattern
+
+> **ADVANCED — use INSTEAD OF (not alongside) the simple `updateSession` two-file pattern.**
+> Only adopt this when you need 2+ middleware functions (e.g. maintenance + auth, rate limiting + auth).
+> For a project that only needs session refresh: use `updateSession()` in `lib/supabase/middleware.ts` directly.
+> Cursor: if `lib/supabase/middleware.ts` already exists, do NOT also create a chain — pick one.
 
 Handle auth + other concerns without nesting callbacks.
 

@@ -3,9 +3,11 @@ description: >
   what type of project is this, identify project type, SaaS app subscription billing,
   e-commerce store products orders, AI chat app OpenAI conversations messages,
   booking scheduling app appointments, lead generation landing page, blog content site,
+  CRM dashboard internal tool data management client management deal pipeline kanban,
   which recipe applies, what features should this project have, project pattern recognition,
   subscription table present, products table present, conversations table present,
-  what integrations does this project use, project architecture type
+  clients deals staff members table present, what integrations does this project use,
+  project architecture type, client-side data fetching dashboard app
 globs: []
 alwaysApply: false
 ---
@@ -159,6 +161,38 @@ find ./app/api -name "route.ts" | sort
 
 ---
 
+### TYPE H — CRM / Internal Dashboard
+**Signals**: `clients` or `deals` or `staff_members` or `leads` (CRM-style) tables + NO Stripe + heavy client-side rendering + `localStorage` config + `contexts/AuthContext`
+**Typical tables**: `profiles`, `clients`, `deals`, `staff_members`, `deal_appointments`, `user_profiles`, `pending_registrations`
+**Architecture**: `src/` directory, all data fetched client-side via `useEffect`, `ConditionalAppLayout` auth guard, config stored in `localStorage`, batch DB sync on state change
+
+**Most common failure modes**:
+1. Data not loading after login — `useEffect` fires before `user` is set → fetch runs with null user
+2. camelCase/snake_case mismatch — Supabase returns `first_name`, TypeScript expects `firstName` → mapper missing or wrong
+3. localStorage config stale — pipeline/column config in localStorage diverges from DB → app shows wrong columns
+4. Batch upsert silently failing — chunk error swallowed with `console.error`, user sees no feedback
+5. Missing pagination — table has 1000+ rows, initial fetch loads all → slow first paint
+
+**What's almost certainly missing**:
+- `if (!user) return` guard before every `supabase.from()` call in `useEffect`
+- camelCase ↔ snake_case mapper functions (`rowToClient`, `clientToRow`)
+- Pagination for large tables (range-based: `.range(offset, offset + pageSize - 1)`)
+- Error boundary or fallback UI for data load failures
+- `Promise.allSettled` instead of `Promise.all` for parallel table loads (one failing shouldn't block others)
+
+**Architecture signals that confirm TYPE H**:
+```bash
+# Check for client-side-only data pattern
+grep -rn "useEffect" src/hooks/ src/contexts/     # data fetching in hooks/context
+grep -rn "localStorage" src/hooks/                # config persistence
+grep -rn "ConditionalAppLayout\|AppLayout" src/   # client-side auth guard
+ls src/lib/supabase/                              # session.ts or crmService.ts present
+```
+
+**Commands to run first**: `/audit-codebase` → `/fix-data-sync` (if data not loading) → `/fix-supabase-rls` (if 0 rows returned)
+
+---
+
 ### TYPE G — Unknown / Custom
 **Signals**: None of the above match clearly
 
@@ -189,5 +223,9 @@ Almost certainly missing: [list]
 
 Recommended first command: /audit-codebase
 ```
+
+> **TYPE H note**: If identified as CRM/Dashboard, check `src/` directory structure first.
+> Key files to read: `src/contexts/AuthContext.tsx`, `src/hooks/use*.ts`, `src/lib/supabase/`.
+> Data issues → `/fix-data-sync` before `/fix-database` (problem is usually client-side, not RLS).
 
 Then proceed with the audit knowing what to look for.

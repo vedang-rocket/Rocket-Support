@@ -10,6 +10,7 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import triage_graph as tg
+import format_output as fmt_out
 
 
 def main():
@@ -39,7 +40,7 @@ def main():
             desc      = f.get("issue", "")
             fix_hint  = f.get("fix", "")
             category  = (f.get("chain") or "").upper()
-        elif src == "semgrep":
+        elif src in ("semgrep", "probe"):
             file_path = f.get("path", "")
             line      = f.get("start", {}).get("line", 0)
             desc      = f.get("extra", {}).get("message", "")[:120]
@@ -88,8 +89,11 @@ def main():
     with open(result_file, "w") as f:
         json.dump(result, f)
 
-    # Print summary to stdout for bash to capture and display
-    print(result["summary"])
+    # Print Rich-formatted report directly to /dev/tty (bypasses bash $() capture)
+    fmt_out.print_triage_report(state)
+
+    # Print minimal marker to stdout so bash knows we succeeded
+    print("__TRIAGE_OK__")
 
 
 if __name__ == "__main__":

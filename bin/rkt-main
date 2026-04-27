@@ -22,6 +22,8 @@ ENGINE_SMART="$ENGINE_DIR/rkt_smart.py"
 ENGINE_RULES="$ENGINE_DIR/rules"
 ENGINE_AVAILABLE=false
 [[ -f "$ENGINE_VENV" && -f "$ENGINE_FP" ]] && ENGINE_AVAILABLE=true
+SKIP_SEMGREP=false
+[[ "${RKT_SKIP_SEMGREP:-}" == "1" ]] && SKIP_SEMGREP=true
 
 GREEN='\033[0;32m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'
 YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
@@ -148,6 +150,31 @@ else
 fi
 VAULT_DIR="$OBSIDIAN_DIR/$PROJECT"
 
+# ── Local zip root normalization (single nested app folder) ───
+# Common zip exports produce: root/<app>/package.json.
+# If local root has no package.json but exactly one child dir does, use child dir.
+if $RUN_LOCAL && [[ ! -f "$PROJECT_DIR/package.json" ]]; then
+  NESTED_APP_DIR=$(python3 - "$PROJECT_DIR" << 'PYEOF'
+import os, sys
+root = sys.argv[1]
+try:
+    children = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+except Exception:
+    print("")
+    sys.exit(0)
+
+matches = [os.path.join(root, d) for d in children if os.path.isfile(os.path.join(root, d, "package.json"))]
+print(matches[0] if len(matches) == 1 else "")
+PYEOF
+)
+  if [[ -n "$NESTED_APP_DIR" ]]; then
+    info "Detected nested app root with package.json: $NESTED_APP_DIR"
+    PROJECT_DIR="$NESTED_APP_DIR"
+    PROJECT="${PROJECT_DIR##*/}"
+    VAULT_DIR="$OBSIDIAN_DIR/$PROJECT"
+  fi
+fi
+
 echo -e "\n${BOLD}rkt-main${NC} → ${BOLD}$PROJECT${NC}"
 if $RUN_LOCAL; then
   echo -e "Mode:  local folder"
@@ -193,7 +220,9 @@ if $_is_setup && ! $RUN_FORCE; then
     fi
 
     echo -e "\n  ${BLUE}▸${NC} Running Semgrep autofix scan..."
-    if [[ -f "$ENGINE_SEMGREP" ]]; then
+    if $SKIP_SEMGREP; then
+      skip "semgrep scan skipped (RKT_SKIP_SEMGREP=1)"
+    elif [[ -f "$ENGINE_SEMGREP" ]]; then
       SEMGREP_JSON=$("$ENGINE_SEMGREP" --config "$ENGINE_RULES" --json --quiet --no-git-ignore "$PROJECT_DIR" 2>/dev/null)
       ISSUE_COUNT=0
       [[ -n "$SEMGREP_JSON" ]] && ISSUE_COUNT=$(echo "$SEMGREP_JSON" | python3 -c \
@@ -622,7 +651,12 @@ ok "CLAUDE.md generated ($LINE_COUNT lines — project-specific with engine inte
 section 8 "Build code-review-graph"
 if command -v code-review-graph >/dev/null 2>&1; then
   cd "$PROJECT_DIR"
-  code-review-graph build 2>/dev/null && ok "code-review-graph built" || warn "build failed — run manually"
+  # Pass explicit repo root so build does not depend on cwd inference.
+  if code-review-graph build --repo "$PROJECT_DIR"; then
+    ok "code-review-graph built"
+  else
+    warn "build failed — run manually: code-review-graph build --repo \"$PROJECT_DIR\""
+  fi
 else
   skip "code-review-graph not in PATH"
 fi
@@ -850,49 +884,33 @@ if $ENGINE_AVAILABLE; then
     warn "Fingerprinter returned no output"
   fi
 
-  # ── E2. Semgrep autofix scan ─────────────────────────────────
-  echo -e "\n  ${BLUE}▸${NC} Running Semgrep autofix scan..."
-  if [[ "$PROJECT_DIR" == *"rocket-support/workspace"* ]]; then
-    info "Workspace project — skipping duplicate semgrep scan (already ran in triage phase)"
+  # ── E2. probe_scanner scan ────────────────────────────────────
+  echo -e "\n  ${BLUE}▸${NC} Running probe_scanner (ast-grep + rg)..."
+  if $SKIP_SEMGREP; then
+    info "probe_scanner: skipped (triage already scanned)"
     SEMGREP_SUMMARY="skipped (triage already scanned)"
-  elif [[ -f "$ENGINE_SEMGREP" ]]; then
-    # First pass: count issues
-    SEMGREP_JSON=$("$ENGINE_SEMGREP" \
-      --config "$ENGINE_RULES" \
-      --json --quiet --no-git-ignore \
-      "$PROJECT_DIR" 2>/dev/null)
+  else
+    PROBE_JSON=$("$ENGINE_VENV" -c "
+import sys, json
+sys.path.insert(0, '$(dirname "$ENGINE_FP")')
+import probe_scanner
+r = probe_scanner.run_probe_scanner('$PROJECT_DIR')
+print(json.dumps(r))
+" 2>/dev/null)
 
     ISSUE_COUNT=0
-    if [[ -n "$SEMGREP_JSON" ]]; then
-      ISSUE_COUNT=$(echo "$SEMGREP_JSON" | python3 -c \
-        "import sys,json; d=json.load(sys.stdin); print(len(d.get('results',[])))" 2>/dev/null || echo 0)
+    if [[ -n "$PROBE_JSON" ]]; then
+      ISSUE_COUNT=$(echo "$PROBE_JSON" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(len(d.get('findings',[])))" 2>/dev/null || echo 0)
     fi
 
     if [[ "$ISSUE_COUNT" -gt 0 ]]; then
-      # Second pass: apply autofixes
-      "$ENGINE_SEMGREP" \
-        --config "$ENGINE_RULES" \
-        --autofix --quiet --no-git-ignore \
-        "$PROJECT_DIR" 2>/dev/null
-
-      # Which files changed?
-      CHANGED_FILES=$(echo "$SEMGREP_JSON" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-files = sorted(set(r.get('path','') for r in d.get('results', []) if r.get('extra',{}).get('fix')))
-for f in files: print(f'    {f}')
-" 2>/dev/null)
-
-      ok "Semgrep: $ISSUE_COUNT issue(s) found and autofixed"
-      [[ -n "$CHANGED_FILES" ]] && echo -e "  Files changed:\n$CHANGED_FILES"
-      SEMGREP_SUMMARY="$ISSUE_COUNT violation(s) autofixed"
+      ok "probe_scanner: $ISSUE_COUNT issue(s) found"
+      SEMGREP_SUMMARY="$ISSUE_COUNT violation(s) detected"
     else
-      ok "Semgrep: no violations found"
+      ok "probe_scanner: no violations"
       SEMGREP_SUMMARY="0 violations"
     fi
-  else
-    warn "semgrep not found in engine venv (run: pip install semgrep in .venv)"
-    SEMGREP_SUMMARY="skipped (semgrep not available)"
   fi
 
   # ── E3. Seed fix database with this project fingerprint ──────
@@ -910,27 +928,38 @@ for f in files: print(f'    {f}')
 fi
 
 # ── Done ──────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BOLD}  $PROJECT is ready${NC}"
-echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-echo -e "  ${BOLD}Code:${NC}   $PROJECT_DIR"
-echo -e "  ${BOLD}Vault:${NC}  $VAULT_DIR"
-echo ""
-echo -e "  ${BOLD}Tools installed:${NC}"
-echo -e "  ✓ v34 Cursor rules (61 rules, 40 commands)"
-echo -e "  ✓ Graphify (PreToolUse hook — graph before grep)"
-echo -e "  ✓ UI/UX Pro Max (auto-activates on UI requests)"
-echo -e "  ✓ MCP: Context7 + Sequential Thinking + Memory + Playwright"
-echo -e "  ✓ code-review-graph"
-echo -e "  ✓ Obsidian vault"
-echo -e "  ✓ RuFlo V3 daemon"
+# Build Rich ready-panel args
+_ready_args=(
+  ready-panel
+  --project "$PROJECT"
+  --code-dir "$PROJECT_DIR"
+  --vault-dir "$VAULT_DIR"
+  --tool "v34 Cursor rules (61 rules, 40 commands)"
+  --tool "Graphify (PreToolUse hook — graph before grep)"
+  --tool "UI/UX Pro Max (auto-activates on UI requests)"
+  --tool "MCP: Context7 + Sequential Thinking + Memory + Playwright"
+  --tool "code-review-graph"
+  --tool "Obsidian vault"
+  --tool "RuFlo V3 daemon"
+)
 if $ENGINE_AVAILABLE; then
-  echo -e "  ✓ Engine: ${FP_SUMMARY:-fingerprint saved to brain.db}"
-  echo -e "  ✓ Semgrep: ${SEMGREP_SUMMARY:-scan complete}"
+  _ready_args+=(--engine-summary "${FP_SUMMARY:-fingerprint saved to brain.db}")
+  _ready_args+=(--semgrep-summary "${SEMGREP_SUMMARY:-scan complete}")
 fi
-echo ""
+if ! $RUN_DIAGNOSE; then
+  _ready_args+=(--step "Cursor    → Open Folder → $PROJECT_DIR → /audit-codebase")
+  _ready_args+=(--step "Obsidian  → Open vault  → $VAULT_DIR")
+  _ready_args+=(--step "Claude Code → cd $PROJECT_DIR && claude")
+fi
+
+if [[ -x "$ENGINE_VENV" ]]; then
+  "$ENGINE_VENV" "$ENGINE_DIR/format_output.py" "${_ready_args[@]}" || {
+    # Fallback — plain echoes if Rich helper fails
+    echo -e "\n${BOLD}${GREEN}━━━ $PROJECT is ready ━━━${NC}\n  Code: $PROJECT_DIR\n  Vault: $VAULT_DIR\n"
+  }
+else
+  echo -e "\n${BOLD}${GREEN}━━━ $PROJECT is ready ━━━${NC}\n  Code: $PROJECT_DIR\n  Vault: $VAULT_DIR\n"
+fi
 
 if $RUN_DIAGNOSE; then
   echo -e "  ${BOLD}${CYAN}Running full deterministic diagnosis + fix pipeline...${NC}"
@@ -942,9 +971,5 @@ if $RUN_DIAGNOSE; then
     rkt --local "$PROJECT_DIR"
   fi
 else
-  echo -e "  ${BOLD}Start working:${NC}"
-  echo -e "  1. ${BOLD}Cursor${NC}    → Open Folder → $PROJECT_DIR → /audit-codebase"
-  echo -e "  2. ${BOLD}Obsidian${NC}  → Open vault  → $VAULT_DIR"
-  echo -e "  3. ${BOLD}Claude Code${NC} → cd $PROJECT_DIR && claude"
-  echo ""
+  :
 fi

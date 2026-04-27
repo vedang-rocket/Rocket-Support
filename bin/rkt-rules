@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-rules — Install cursor-rules-v34 into a project only
+#  Usage: rkt-rules --local /path/to/project
+#         rkt-rules /path/to/project
+# ============================================================
+
+set -euo pipefail
+
+RKT_HOME="${RKT_HOME:-$HOME/rocket-support}"
+V34_DIR="$RKT_HOME/cursor-rules-v34"
+V34_ZIP="$HOME/Downloads/rocket-cursor-rules-v34-final.zip"
+
+GREEN='\033[0;32m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'
+YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
+
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+info() { echo -e "  ${BLUE}▸${NC} $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+fail() { echo -e "\n  ${RED}✗ ERROR:${NC} $1\n"; exit 1; }
+
+show_help() {
+  echo -e "\n${BOLD}rkt-rules${NC} — install cursor-rules-v34 into a local project"
+  echo -e "Usage:"
+  echo -e "  rkt-rules --local /path/to/project"
+  echo -e "  rkt-rules /path/to/project"
+  echo -e ""
+  echo -e "What it does:"
+  echo -e "  1) Copies ${BOLD}cursor-rules-v34/.cursor${NC} into your project .cursor/"
+  echo -e "  2) Adds a managed ${BOLD}.gitignore${NC} block for local AI tooling files"
+  echo ""
+}
+
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { show_help; exit 0; }
+[[ $# -eq 0 ]] && { show_help; exit 1; }
+
+RUN_LOCAL=false
+LOCAL_PATH=""
+
+if [[ "${1:-}" == "--local" ]]; then
+  RUN_LOCAL=true
+  LOCAL_PATH="${2:-}"
+else
+  RUN_LOCAL=true
+  LOCAL_PATH="${1:-}"
+fi
+
+[[ "$RUN_LOCAL" == true ]] || fail "Only local mode is supported for rkt-rules"
+[[ -n "$LOCAL_PATH" ]] || fail "Missing local path. Example: rkt-rules --local ~/project"
+
+LOCAL_PATH="${LOCAL_PATH/#\~/$HOME}"
+[[ -d "$LOCAL_PATH" ]] || fail "Project path not found: $LOCAL_PATH"
+PROJECT_DIR="$LOCAL_PATH"
+
+echo -e "\n${BOLD}rkt-rules${NC} → ${BOLD}$PROJECT_DIR${NC}\n"
+
+if [[ ! -d "$V34_DIR/.cursor" ]]; then
+  info "cursor-rules-v34 not found at $V34_DIR — attempting zip extract"
+  [[ -f "$V34_ZIP" ]] || fail "v34 zip not found at $V34_ZIP and no local $V34_DIR"
+  mkdir -p "$RKT_HOME/v34-tmp"
+  unzip -q "$V34_ZIP" -d "$RKT_HOME/v34-tmp"
+  SRC="$(find "$RKT_HOME/v34-tmp" -name "cursor.config" 2>/dev/null | head -1 | xargs dirname)"
+  [[ -n "$SRC" ]] || fail "cursor.config not found inside $V34_ZIP"
+  mkdir -p "$V34_DIR"
+  cp -r "$SRC/." "$V34_DIR/"
+  rm -rf "$RKT_HOME/v34-tmp"
+  ok "Extracted cursor-rules-v34 → $V34_DIR"
+else
+  ok "Using rules from $V34_DIR"
+fi
+
+mkdir -p "$PROJECT_DIR/.cursor"
+cp -r "$V34_DIR/.cursor/." "$PROJECT_DIR/.cursor/"
+RULE_COUNT=$(ls "$PROJECT_DIR/.cursor/rules/" 2>/dev/null | wc -l | tr -d ' ')
+CMD_COUNT=$(ls "$PROJECT_DIR/.cursor/commands/" 2>/dev/null | wc -l | tr -d ' ')
+ok "Installed: $RULE_COUNT rules, $CMD_COUNT commands"
+
+touch "$PROJECT_DIR/.gitignore"
+if ! grep -q "rkt-rules — local dev setup" "$PROJECT_DIR/.gitignore"; then
+  cat >> "$PROJECT_DIR/.gitignore" << 'IGNEOF'
+
+# rkt-rules — local dev setup (never push)
+.cursor/
+CLAUDE.md
+AGENTS.md
+the-rocket-guide.md
+TROUBLESHOOTING.md
+memory-bank/
+graphify-out/
+.claude-flow/
+.swarm/
+code-review-graph/
+.mcp.json
+.claude/commands/
+.claude/agents/
+.claude/helpers/
+.claude/skills/
+.claude/setup-plugins.md
+.claude/memory.db
+.claude/settings.json
+IGNEOF
+  ok ".gitignore updated with rkt-rules block"
+else
+  ok ".gitignore already contains rkt-rules block"
+fi
+
+echo ""
+ok "Done. Open project in Cursor and run: /audit-codebase"
+echo ""

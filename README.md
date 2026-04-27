@@ -1,6 +1,6 @@
 # Rocket-Support — rkt
 
-Three commands. Unzip → triage → fix → deliver. Under 60 seconds.
+Three commands. Unzip → triage → fix → deliver. Under 10 seconds to diagnosis.
 
 Built for Rocket.new support engineers. Unzip a client project, get a root cause diagnosis, apply fixes automatically or via Cursor/Claude, then deliver a clean zip back to the client.
 
@@ -56,11 +56,11 @@ Learns from your changes, strips all tooling artifacts, and zips the fixed proje
 ```
 rkt-crazy ~/Downloads/client.zip "issue"
 
-  PHASE 1 — TRIAGE                          (~13 seconds)
+  PHASE 1 — TRIAGE                          (~3 seconds)
   ├─ Unzip → flatten → snapshot → workspace
   ├─ bun install
   └─ 6-layer engine: chain_walker → schema → fingerprint
-                     → semgrep → fix_database → kb_search
+                     → probe_scanner → fix_database → kb_search
      Outputs: root cause, confidence %, recommended fix mode
 
   PHASE 2 — CURSOR SETUP                    (~45 seconds, skip with --fast)
@@ -96,7 +96,7 @@ In Cursor:
   4. Press Enter
 ```
 
-The prompt contains: issue description, category, confidence, all findings with source and fix mode, and the 7 Rocket.new hard rules.
+The prompt contains: issue description, category, confidence, all findings with source and fix mode, and the 10 Rocket.new hard rules.
 
 ---
 
@@ -108,12 +108,21 @@ Runs automatically during triage on every client project:
 Layer 0:  chain_walker     → Cross-file structural breaks (AUTH, STRIPE, RLS, ENV)
 Layer 0b: schema_checker   → SQL migration audit (TIMESTAMPTZ, triggers, RLS, CASCADE)
 Layer 1:  fingerprint      → Project type (SaaS, E-Commerce, AI, Booking, Landing, Blog)
-Layer 2:  Semgrep          → AST-level autofix scan (7 Rocket.new-specific rules)
-Layer 3:  Fix database     → Vector similarity search in brain.db
+Layer 2:  probe_scanner    → AST + regex scan — 9 Rocket.new rules, <1 second
+Layer 3:  Fix database     → Vector similarity search in brain.db (~12ms)
 Layer 4:  KB search        → Supabase, Next.js, Stripe docs injected as context
 ```
 
 Every finding is scored **HIGH / MED / LOW** confidence before a fix is proposed.
+
+### probe_scanner — replaces semgrep
+
+Layer 2 uses `ast-grep-py` (AST-accurate pattern matching, no false positives from comments) and `rg` (ripgrep, path-filtered string patterns). Runs in under 1 second vs 10–30 seconds for semgrep.
+
+| Tool | Rules | Why |
+|------|-------|-----|
+| `ast-grep-py` | `getSession()`, `cookies()` without await | Matches only real function calls — not comments or strings |
+| `rg` + path glob | all other rules | Sub-second, never scans node_modules |
 
 ### Confidence → action
 
@@ -125,23 +134,26 @@ Every finding is scored **HIGH / MED / LOW** confidence before a fix is proposed
 
 > Middleware (`middleware-missing-updatesession`) is always `PREVIEW_ONLY`. The canonical template destroys custom route logic, so it is never written automatically.
 
-### Semgrep rules (7)
+### probe_scanner rules (9)
 
-| Rule | Catches |
-|------|---------|
-| `supabase-getsession-not-getuser` | `.auth.getSession()` in server code |
-| `stripe-webhook-request-json` | `request.json()` in Stripe webhook handler |
-| `stripe-webhook-req-json-var` | Variable-form `req.json()` in webhook |
-| `supabase-js-in-server-file` | `@supabase/supabase-js` import in server file |
-| `supabase-missing-dynamic-export` | Missing `force-dynamic` on authenticated page |
-| `middleware-missing-updatesession` | `middleware.ts` without `updateSession` |
-| `schema-timestamptz` | Bare `TIMESTAMP` column in SQL migration |
+| Rule ID | Catches | Tool |
+|---------|---------|------|
+| `supabase-getsession-not-getuser` | `.auth.getSession()` in server code | ast-grep-py |
+| `cookies-without-await-const/let` | `cookies()` without `await` in Next.js 15 | ast-grep-py |
+| `supabase-auth-helpers-*-deprecated` | `@supabase/auth-helpers-nextjs` import | rg |
+| `stripe-webhook-request-json` | `request.json()` in Stripe webhook handler | rg + glob |
+| `supabase-js-in-server-file` | `@supabase/supabase-js` import in server file | rg + glob |
+| `next-public-service-role-key` | `NEXT_PUBLIC_` prefix on secret env vars | rg + glob |
+| `supabase-missing-dynamic-export` | Authenticated page missing `force-dynamic` | rg + glob |
+| `supabase-new-project-anon-key-name` | Old `eyJ` JWT key format (post-Nov 2025 projects use `sb_publishable_`) | rg + glob |
+
+Rule 3 (middleware location) is handled by `chain_walker` — not duplicated here.
 
 ---
 
 ## brain.db — The Learning Database
 
-Every fix run saves patterns to `~/.rocket-support/brain.db`. The database improves with every client project.
+Every fix run saves patterns to `~/.rocket-support/brain.db`. The database improves with every client project. Lookups use pure-numpy character n-gram similarity (~12ms, no sklearn dependency).
 
 ```bash
 # Check what has been learned
@@ -150,16 +162,41 @@ python3 ~/rocket-support/engine/rkt_smart.py --db-stats
 
 ```
 Fix database: ~/.rocket-support/brain.db
-Total fixes:  12
+Total fixes:  33
 
 Category     Uses   V   Pattern
-AUTH         7      ✓   middleware.ts missing updateSession()
-STRIPE       3      ✓   request.json() in webhook handler
-SUPABASE     3      ✓   Missing RLS, missing profile trigger
-ENV          1          NEXT_PUBLIC_ on service role key
+AUTH         52     ✓   middleware.ts missing updateSession()
+AUTH         12     ✓   getUser() not getSession() in server code
+STRIPE        6     ✓   request.json() in Stripe webhook handler
+SUPABASE      3     ✓   RLS blocking anonymous INSERT on leads table
 ```
 
 `rkt-deliver` automatically saves any manual fixes made in GUIDED or CLAUDE mode back to brain.db.
+
+---
+
+## Diff Output
+
+The engine uses **delta** for syntax-highlighted diffs when available, with a Rich fallback. Install once:
+
+```bash
+brew install git-delta
+```
+
+---
+
+## Cursor — ast-grep MCP
+
+The installed Cursor rules include `ast-grep-mcp` for structural code search inside Cursor:
+
+```json
+"ast-grep": {
+  "command": "npx",
+  "args": ["-y", "@ast-grep/mcp"]
+}
+```
+
+Use `/find_code` inside Cursor to search by AST pattern (e.g. `$CLIENT.auth.getSession()`) rather than text.
 
 ---
 
@@ -173,7 +210,7 @@ Before zipping, `rkt-deliver` strips all tooling artifacts from the workspace:
 **Files removed:**
 `CLAUDE.md` · `AGENTS.md` · `.mcp.json` · `the-rocket-guide.md` · `TROUBLESHOOTING.md` · `.rkt_meta.json` · `.rkt_prompt.md` · `ruvector.db` · `ruvector.db-shm` · `ruvector.db-wal` · `*.rkt_backup`
 
-The output zip lands at `~/Downloads/<projectname>_fixed_<timestamp>.zip`.
+The output zip lands at `~/Documents/Rocket/<project>/fixed/<project>_fixed.zip`.
 
 ---
 
@@ -254,3 +291,14 @@ Violations caught automatically by the engine. Never violate these in a fix:
 8. Always `export const dynamic = 'force-dynamic'` on authenticated pages
 9. Social OAuth never works on localhost — test on deployed URL only
 10. Post-Nov 2025 Supabase projects use `sb_publishable_` key format, not `anon_key`
+
+---
+
+## Performance
+
+| Layer | Before | After |
+|-------|--------|-------|
+| probe_scanner (was semgrep) | 10–30s | <1s |
+| db_lookup (was sklearn) | ~3.7s | ~12ms warm |
+| fingerprint type detection | 3-way tie at 28% | correct winner |
+| **Phase 1 total** | **~32s** | **~3s** |

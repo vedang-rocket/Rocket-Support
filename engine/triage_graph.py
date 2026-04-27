@@ -32,6 +32,12 @@ from context_filter import filter_findings
 from dedup import deduplicate
 from symptom_ranker import rank_findings
 
+try:
+    import probe_scanner as _probe_scanner
+    _PROBE_AVAILABLE = True
+except ImportError:
+    _PROBE_AVAILABLE = False
+
 
 # ── State schema ──────────────────────────────────────────────────────────────
 
@@ -140,7 +146,10 @@ def node_schema(state: TriageState) -> dict:
 
 def node_semgrep(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    result = rkt_engine.run_semgrep(state["workspace_path"], autofix=False)
+    if _PROBE_AVAILABLE:
+        result = _probe_scanner.run_probe_scanner(state["workspace_path"])
+    else:
+        result = rkt_engine.run_semgrep(state["workspace_path"], autofix=False)
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["semgrep_ms"] = round(elapsed, 1)
@@ -165,8 +174,9 @@ def node_context_filter(state: TriageState) -> dict:
     raw: List[Dict[str, Any]] = []
     for f in (state.get("cw_findings") or []):
         raw.append({"source": "chain_walker", "finding": f, "fix_mode": "GUIDED", "confidence": 0.75})
+    _scan_src = "probe" if _PROBE_AVAILABLE else "semgrep"
     for f in (state.get("semgrep_findings") or []):
-        raw.append({"source": "semgrep", "finding": f, "fix_mode": "GUIDED", "confidence": 0.75})
+        raw.append({"source": _scan_src, "finding": f, "fix_mode": "GUIDED", "confidence": 0.75})
     for f in (state.get("fs_issues") or []):
         raw.append({"source": "fs_checks", "finding": f, "fix_mode": "GUIDED", "confidence": 0.75})
 
@@ -229,7 +239,7 @@ def node_score_and_route(state: TriageState) -> dict:
 
         if src == "chain_walker":
             mode, conf = _score_cw_finding(f)
-        elif src == "semgrep":
+        elif src in ("semgrep", "probe"):
             mode, conf = _score_semgrep_finding(f)
         else:
             mode, conf = "GUIDED", 0.75
@@ -319,7 +329,7 @@ def node_build_summary(state: TriageState) -> dict:
 
             if src == "chain_walker":
                 msg = f.get("issue", "")
-            elif src == "semgrep":
+            elif src in ("semgrep", "probe"):
                 rule = (f.get("check_id") or "").split(".")[-1]
                 path = f.get("path", "")
                 line = f.get("start", {}).get("line", "?")

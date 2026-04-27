@@ -167,11 +167,18 @@ const { data: claims } = await supabase.auth.getClaims()
 ```
 
 ```typescript
-// middleware.ts — USE getClaims() here (runs on every request)
-export async function middleware(request: NextRequest) {
-  const supabase = createServerClient(/* ... */)
+// middleware.ts — USE getClaims() for role checks, then delegate to updateSession
+import { type NextRequest, NextResponse } from 'next/server'
+import { updateSession } from '@/lib/supabase/middleware'
+import { createServerClient } from '@supabase/ssr'
 
-  // getClaims() is microseconds — safe to call on every request
+export async function middleware(request: NextRequest) {
+  // getClaims() is microseconds — safe for role checks on every request
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: { getAll: () => request.cookies.getAll(), setAll: () => {} } }
+  )
   const { data: claims } = await supabase.auth.getClaims()
 
   // Protect /admin route — check role from JWT claims locally
@@ -181,7 +188,8 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  return response
+  // Always delegate to updateSession last — it refreshes cookies
+  return updateSession(request)
 }
 
 // app/api/payments/route.ts — USE getUser() for sensitive operations
@@ -196,58 +204,154 @@ export async function POST(request: NextRequest) {
 
 ---
 
-## onAuthStateChange — Listen to Auth Events
+## AuthContext — Full Pattern (from real Rocket projects)
+
+The full AuthContext pattern exposes `user`, `loading`, `signIn`, `signUp`, `signOut`, and `isEmailVerified`. Use the singleton client to avoid duplicate instances.
 
 ```typescript
-// components/AuthProvider.tsx — wrap your app with this
+// contexts/AuthContext.tsx
 'use client'
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import type { User } from '@supabase/supabase-js'
 
-const AuthContext = createContext<{ user: User | null }>({ user: null })
+interface AuthContextType {
+  user: User | null
+  loading: boolean
+  signIn: (email: string, password: string) => Promise<{ error: string | null }>
+  signUp: (email: string, password: string, fullName: string) => Promise<{ error: string | null }>
+  signOut: () => Promise<void>
+  isEmailVerified: () => boolean
+}
+
+const AuthContext = createContext<AuthContextType>({
+  user: null,
+  loading: true,
+  signIn: async () => ({ error: null }),
+  signUp: async () => ({ error: null }),
+  signOut: async () => {},
+  isEmailVerified: () => false,
+})
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
-  const supabase = createClient()
+  const [loading, setLoading] = useState(true)
+  const supabase = createClient()   // use singleton client
 
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getUser().then(({ data: { user } }) => setUser(user))
+    // Get initial user (getUser validates with server — not getSession)
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      setUser(user)
+      setLoading(false)
+    })
 
-    // Listen to auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        setUser(session?.user ?? null)
-
+      async (event, session) => {
         switch (event) {
+          case 'INITIAL_SESSION':
           case 'SIGNED_IN':
-            // User signed in — redirect or update UI
+          case 'TOKEN_REFRESHED':
+          case 'USER_UPDATED':
+            setUser(session?.user ?? null)
             break
           case 'SIGNED_OUT':
-            // User signed out — clear local state
+            setUser(null)
             break
-          case 'TOKEN_REFRESHED':
-            // Access token silently refreshed — no action needed
-            break
-          case 'USER_UPDATED':
-            // User updated email/password — re-fetch user data
-            break
-          case 'PASSWORD_RECOVERY':
-            // User clicked password reset link — show reset form
-            break
+          // PASSWORD_RECOVERY: show reset form — handle in your reset page
         }
+        setLoading(false)
       }
     )
 
     return () => subscription.unsubscribe()
   }, [])
 
-  return <AuthContext.Provider value={{ user }}>{children}</AuthContext.Provider>
+  const signIn = useCallback(async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    return { error: error?.message ?? null }
+  }, [supabase])
+
+  const signUp = useCallback(async (email: string, password: string, fullName: string) => {
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { full_name: fullName } },
+    })
+    return { error: error?.message ?? null }
+  }, [supabase])
+
+  const signOut = useCallback(async () => {
+    setUser(null)
+    await supabase.auth.signOut()
+  }, [supabase])
+
+  const isEmailVerified = useCallback(() => {
+    return !!user?.email_confirmed_at
+  }, [user])
+
+  return (
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, isEmailVerified }}>
+      {children}
+    </AuthContext.Provider>
+  )
 }
 
-export const useUser = () => useContext(AuthContext)
+export const useAuth = () => useContext(AuthContext)
 ```
+
+## ConditionalAppLayout — Public vs Protected Routing (Client Pattern)
+
+For apps that do auth-checking client-side (not server-side middleware redirect), use a layout wrapper:
+
+```typescript
+// components/layout/ConditionalAppLayout.tsx
+'use client'
+import { useAuth } from '@/contexts/AuthContext'
+import { useRouter, usePathname } from 'next/navigation'
+import { useEffect } from 'react'
+import AppLayout from './AppLayout'
+
+const PUBLIC_PATHS = ['/login', '/register', '/signup', '/auth']
+
+export function ConditionalAppLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname()
+  const isPublic = PUBLIC_PATHS.some(p => pathname.startsWith(p))
+
+  if (isPublic) return <>{children}</>
+  return <AppLayout>{children}</AppLayout>
+}
+```
+
+```typescript
+// components/layout/AppLayout.tsx
+'use client'
+import { useAuth } from '@/contexts/AuthContext'
+import { useRouter } from 'next/navigation'
+import { useEffect } from 'react'
+import Sidebar from './Sidebar'
+
+export default function AppLayout({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (!loading && !user) router.replace('/login')
+  }, [user, loading, router])
+
+  if (loading) return <div>Loading...</div>
+  if (!user) return null
+
+  return (
+    <div style={{ display: 'flex' }}>
+      <Sidebar />
+      <main style={{ flex: 1 }}>{children}</main>
+    </div>
+  )
+}
+```
+
+> Use this client-side pattern when middleware only refreshes cookies (not redirects).
+> If middleware already redirects to /login, you do NOT need the useEffect redirect — pick one.
 
 ---
 
@@ -340,46 +444,43 @@ export async function GET() {
 
 ## What Middleware Does (and why it must exist)
 
-```typescript
+```
 // middleware.ts — this is NOT just an auth guard
 // Its primary job is to REFRESH the session on every request
 // Without it: access tokens expire and users get random 401 errors
 
-import { createServerClient } from '@supabase/ssr'
-import { NextResponse, type NextRequest } from 'next/server'
+CANONICAL TWO-FILE PATTERN (always use this — never inline createServerClient in middleware.ts):
+  middleware.ts          ← thin wrapper at project root
+  lib/supabase/middleware.ts ← updateSession() logic lives here
+
+Cursor: if middleware.ts already exists, DO NOT create a second one.
+        If lib/supabase/middleware.ts already exists, DO NOT recreate inline logic.
+        One file, one responsibility.
+```
+
+```typescript
+// middleware.ts — thin wrapper at PROJECT ROOT (never inside /app)
+import { type NextRequest } from 'next/server'
+import { updateSession } from '@/lib/supabase/middleware'
 
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request })
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() { return request.cookies.getAll() },
-        setAll(cookiesToSet) {
-          // CRITICAL: set cookies on BOTH request and response
-          // If you only set on response, SSR components won't see the refreshed token
-          cookiesToSet.forEach(({ name, value, options }) =>
-            request.cookies.set(name, value)
-          )
-          supabaseResponse = NextResponse.next({ request })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
-        },
-      },
-    }
-  )
-
-  // THIS is the session refresh — do not skip it
-  // Do not use getClaims() here — getUser() triggers the refresh
-  await supabase.auth.getUser()
-
-  return supabaseResponse
+  return await updateSession(request)
 }
 
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|ico|css|js)$).*)'],
 }
+```
+
+```typescript
+// lib/supabase/middleware.ts — all session refresh logic lives HERE
+// (exact implementation in rocket-code-patterns-core.mdc)
+// Do NOT duplicate this logic in middleware.ts itself
+export async function updateSession(request: NextRequest): Promise<NextResponse> { ... }
+```
+
+```
+If you need multiple middleware concerns (maintenance mode, rate limiting, A/B):
+→ Use the CHAIN PATTERN from rocket-nextjs-patterns.mdc instead
+→ That pattern REPLACES this simple two-file setup — do not use both
 ```

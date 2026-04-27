@@ -1,0 +1,159 @@
+---
+description: >
+  natural language problem routing, plain english problem description, something is broken,
+  my login is broken, nothing is loading, data not showing, dashboard empty, page blank,
+  payment not working, checkout broken, preview not loading, build failing, deploy failing,
+  app is slow, can't log in, keeps logging me out, signup broken, save not working,
+  data disappeared, stripe broken, netlify error, works locally not in production
+globs: []
+alwaysApply: true
+---
+
+# Natural Language Router
+
+> When a message describes a problem in plain English (no slash command), automatically
+> classify it using the map below and run the correct workflow WITHOUT asking for clarification.
+> Diagnose first. If the diagnosis reveals the wrong path, adjust — do not ask upfront.
+
+---
+
+## SYMPTOM → WORKFLOW MAP
+
+### LOGIN / ACCOUNT PROBLEMS
+Trigger words: "can't log in", "login broken", "sign in not working", "keeps logging me out",
+"logged out", "session expired", "kicked out", "redirect loop", "sends me back to login",
+"Google login", "social login", "OAuth", "signup broken", "can't create account",
+"register not working", "forgot password", "reset password", "blank after login",
+"logged in but can't see anything", "dashboard blank after signing in"
+
+→ Route to: `/fix-auth`
+
+---
+
+### DATA NOT LOADING / EMPTY STATE
+Trigger words: "nothing is loading", "nothing shows up", "page is blank", "dashboard empty",
+"data not showing", "can't see my data", "blank page", "empty list", "no results",
+"nothing appears", "content missing", "records gone", "table empty",
+"data was there now it's gone", "my items disappeared"
+
+→ Check project type first:
+  - If `src/contexts/AuthContext.tsx` exists OR data fetching is in hooks/useEffect → `/fix-data-sync`
+  - Otherwise → `/fix-database`
+
+---
+
+### DATA NOT SAVING / CHANGES LOST
+Trigger words: "save not working", "data not saving", "changes not saving", "lost my data",
+"I saved but it's gone", "edits not sticking", "form submit does nothing",
+"button does nothing", "nothing happens when I click save", "data reverts",
+"changes disappear after refresh"
+
+→ Route to: `/fix-data-sync` → if that passes clean, then `/fix-database`
+
+---
+
+### PAYMENT / CHECKOUT BROKEN
+Trigger words: "payment not working", "checkout broken", "Stripe error", "can't pay",
+"payment fails", "paid but nothing happened", "subscription not working",
+"billing broken", "webhook error", "card declined but charge went through",
+"upgrade not reflecting", "downgrade not working", "cancel not working"
+
+→ Route to: `/fix-stripe`
+
+---
+
+### PREVIEW NOT LOADING / SCRIPTS BLOCKED
+Trigger words: "preview not loading", "preview is blank", "preview shows nothing",
+"preview broken", "scripts blocked", "analytics not working", "GTM not loading",
+"Google Analytics not firing", "ads not showing", "blocked by browser",
+"refused to load", "content security policy", "CSP error"
+
+→ Route to: `/preview-error`
+
+---
+
+### BUILD / DEPLOY FAILING
+Trigger words: "build failing", "build error", "deploy failing", "deployment broken",
+"Netlify error", "Netlify build failed", "works locally but not in production",
+"broken in production", "prod is down", "live site broken", "after deploy it stopped working",
+"TypeScript error", "module not found"
+
+→ Route to: `/fix-deployment`
+
+---
+
+### APP IS SLOW
+Trigger words: "app is slow", "really slow", "loading takes forever", "slow to load",
+"takes ages", "hangs", "freezes", "pages take a long time", "database is slow",
+"queries are slow", "performance issues"
+
+→ Route to: `/fix-performance`
+
+---
+
+### DON'T KNOW WHAT'S WRONG / GENERAL
+Trigger words: "something is broken", "it's not working", "help", "broken", "error",
+"not sure what's wrong", "just stopped working", "nothing works", paste of error message
+
+→ Route to: `/audit-codebase` (comprehensive health check — finds everything)
+
+---
+
+## PLAIN LANGUAGE OUTPUT RULES
+
+When explaining findings or fixes, ALWAYS replace technical terms with plain language:
+
+| Technical term | Plain language |
+|---|---|
+| middleware | a background file that keeps you logged in between pages |
+| RLS / Row Level Security | database access rules that control who can see what |
+| Server Component / SSR | code that runs on the server before the page loads |
+| hydration | the process of the page becoming interactive |
+| webhook | an automatic signal sent when a payment happens |
+| migration / migration file | a file that sets up or changes your database |
+| token expired / access token | your login session ran out |
+| environment variable / env var | a secret setting stored outside your code |
+| CORS | a browser security rule that blocked the request |
+| anon key / service role key | a password your app uses to talk to the database |
+| getUser() / getSession() | a function that checks if you're logged in |
+| cookies | small files the browser stores to remember your login |
+| RLS policy | a rule that decides who can read or change each piece of data |
+| Supabase project paused | your database was switched off due to inactivity |
+| auth callback | the page that completes your login after clicking a link |
+
+---
+
+## RESPONSE STRUCTURE (non-technical output)
+
+When the user has NOT used a slash command, structure the response as:
+
+```
+🔍 What I think is happening:
+[Plain English description — one or two sentences, no jargon]
+
+🛠 What I'll do to fix it:
+[Plain English description of the fix]
+
+📁 Files I'll change:
+[Simple file paths — just the filename is enough]
+
+📁 Files I will NOT touch:
+[What's safe]
+
+[Apply the fix]
+
+✅ How to check it's fixed:
+[Simple test steps — "go to your login page and try signing in"]
+
+💬 Why this fixes it:
+[Plain English explanation of root cause and why the fix works]
+```
+
+---
+
+## ESCALATION RULE
+
+If after one fix the problem persists, do NOT ask the user to diagnose further.
+Run `/audit-codebase` automatically and report findings in plain language.
+Never tell a non-technical user to "check the console", "grep for X", or "run tsc".
+Run those checks yourself and translate the results into plain English.

@@ -79,6 +79,53 @@ This is not just for humans — it directly improves Cursor's ability to reason 
 └── package.json
 ```
 
+## File Structure — Next.js (TypeScript) — src/ Variant
+
+Rocket also generates projects with `src/` prefix. All paths under `src/`, tsconfig paths alias `@/*` → `./src/*`.
+Middleware lives at `src/middleware.ts` (Next.js supports both root and `src/`).
+
+```
+/
+├── src/
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
+│   │   ├── login/page.tsx
+│   │   ├── register/page.tsx
+│   │   └── auth/callback/route.ts
+│   ├── components/
+│   │   └── layout/
+│   │       ├── ConditionalAppLayout.tsx  # Routes public vs authenticated
+│   │       ├── AppLayout.tsx             # Sidebar + auth guard (client-side)
+│   │       └── Sidebar.tsx
+│   ├── contexts/
+│   │   └── AuthContext.tsx              # onAuthStateChange + signIn/signOut
+│   ├── hooks/
+│   │   └── useLocalStorage.ts           # Cross-tab localStorage sync
+│   ├── lib/
+│   │   └── supabase/
+│   │       ├── client.tsx               # Browser client (singleton)
+│   │       ├── server.ts                # Server-side client
+│   │       └── session.ts              # updateSession() — some projects use session.ts not middleware.ts
+│   └── types/
+│       └── index.ts
+├── src/middleware.ts                    # Calls updateSession from lib/supabase/session.ts
+├── supabase/
+│   └── migrations/                     # SQL migration files
+├── next.config.mjs                     # Note: Rocket sometimes generates .mjs not .ts
+├── tailwind.config.js
+└── package.json
+```
+
+**tsconfig.json paths for src/ projects:**
+```json
+{
+  "compilerOptions": {
+    "paths": { "@/*": ["./src/*"] }
+  }
+}
+```
+
 ## File Structure — React (JavaScript) — Simpler Apps
 
 ```
@@ -107,10 +154,36 @@ This is not just for humans — it directly improves Cursor's ability to reason 
 ## Supabase Client Files — Exact Rocket Pattern
 
 ### `lib/supabase/client.ts` (Browser / Client Components)
+
+**Simple pattern** (most projects):
 ```typescript
 import { createBrowserClient } from '@supabase/ssr'
 
 export function createClient() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
+```
+
+**Singleton pattern** (use when AuthContext or multiple components call createClient — prevents duplicate instances during prerender):
+```typescript
+import { createBrowserClient } from '@supabase/ssr'
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+let _client: SupabaseClient | undefined
+
+export function createClient(): SupabaseClient {
+  if (typeof window !== 'undefined') {
+    if (!_client) {
+      _client = createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      )
+    }
+    return _client
+  }
   return createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -197,10 +270,13 @@ export async function updateSession(request: NextRequest) {
 }
 ```
 
-### `middleware.ts` (Root — calls updateSession)
+### `middleware.ts` or `src/middleware.ts` (Root — calls updateSession)
+
+> **File naming note**: Some Rocket projects use `lib/supabase/session.ts` instead of `lib/supabase/middleware.ts` — both export `updateSession()`. When you see `session.ts`, import from there.
+
 ```typescript
 import { type NextRequest } from 'next/server'
-import { updateSession } from '@/lib/supabase/middleware'
+import { updateSession } from '@/lib/supabase/middleware'  // or session.ts
 
 export async function middleware(request: NextRequest) {
   return await updateSession(request)
@@ -212,6 +288,41 @@ export const config = {
   ],
 }
 ```
+
+---
+
+## Typical Rocket next.config.mjs Settings
+
+Rocket projects commonly use `.mjs` (not `.ts`) and include these settings:
+
+```javascript
+// next.config.mjs
+import imageHosts from './image-hosts.config.mjs'  // if it exists
+
+const nextConfig = {
+  productionBrowserSourceMaps: true,
+  distDir: process.env.DIST_DIR || '.next',
+  typescript: { ignoreBuildErrors: true },   // Rocket default — TS errors don't block build
+  eslint: { ignoreDuringBuilds: true },       // Rocket default — ESLint errors don't block build
+  images: {
+    remotePatterns: imageHosts,               // loaded from separate config file
+    minimumCacheTTL: 60,
+  },
+  webpack: (config, { isServer }) => {
+    // @dhiwise/component-tagger — Rocket.new component preview
+    config.module.rules.push({
+      test: /\.(jsx|tsx)$/,
+      use: [{ loader: '@dhiwise/component-tagger/nextLoader' }],
+    })
+    return config
+  },
+}
+
+export default nextConfig
+```
+
+> **Do NOT add CSP headers here by default** — use `/preview-error` command if preview is blank.
+> `ignoreBuildErrors: true` and `ignoreDuringBuilds: true` are intentional Rocket defaults — do NOT remove them.
 
 ---
 

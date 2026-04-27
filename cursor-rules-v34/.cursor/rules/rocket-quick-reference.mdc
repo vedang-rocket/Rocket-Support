@@ -6,6 +6,47 @@ alwaysApply: true
 
 # Rocket.new — Developer Quick Reference
 
+---
+
+## 💬 DON'T KNOW WHAT COMMAND TO USE?
+
+Just describe your problem in plain English — Cursor will figure out the right fix:
+
+```
+my login is broken
+nothing is loading on my dashboard
+I saved something but it keeps disappearing
+the checkout button does nothing
+my build is failing
+the whole app just stopped working
+```
+
+Or type `/triage [your problem]` for a guided diagnosis in plain language.
+No technical knowledge needed — just describe what's wrong.
+
+---
+
+## Probe-First Analysis Order (MANDATORY)
+
+Use this sequence whenever analyzing code:
+
+```bash
+# 1) Semantic discovery first
+probe "auth middleware"
+
+# 2) Expand each relevant hit into full structural context
+probe extract path/to/file.ts:123
+
+# 3) Exact verification last
+rg "getSession|NEXT_PUBLIC|request.json"
+```
+
+- ALWAYS run Probe before `rg`
+- NEVER do blind whole-repo scans when query-scoped retrieval is sufficient
+- NEVER use string search alone to infer behavior
+
+---
+
 > ⚠️ CRITICAL RULES AT THE VERY TOP AND REPEATED AT THE BOTTOM.
 > These are the patterns that cause the most bugs in Rocket projects.
 
@@ -91,7 +132,9 @@ RESEND_API_KEY                        →         add (if email enabled)
 
 | Command | When to use |
 |---|---|
-| `/audit-codebase` | **FIRST on every new project** — full health check before touching anything |
+| `/start` | **Run this first on every new project** — loads context + full audit in one pass |
+| `/triage` | **Plain English entry point** — describe any problem, Cursor routes and fixes automatically |
+| `/audit-codebase` | Full health check only (no context load) |
 | `/security-audit` | Full security sweep — before production or when issues suspected |
 | `/make-legible` | Add file headers to messy project — improves all subsequent fixes |
 | `/spec-feature` | Lock acceptance criteria BEFORE any planning or code |
@@ -117,6 +160,7 @@ RESEND_API_KEY                        →         add (if email enabled)
 | `/docs` | Search Rocket/Supabase/Next.js documentation |
 | `/update-memory` | End of session — saves fixes/decisions to memory-bank/ |
 
+**Not sure what to run?** Just describe the problem in plain English — or use `/triage [description]`
 **New project order**: `/audit-codebase` → `/make-legible` → fix commands
 
 ---

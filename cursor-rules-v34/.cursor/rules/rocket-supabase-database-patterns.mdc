@@ -468,4 +468,107 @@ $$;
 -- Grant only to service_role or specific role
 REVOKE EXECUTE ON FUNCTION admin_get_all_users() FROM PUBLIC, authenticated, anon;
 GRANT EXECUTE ON FUNCTION admin_get_all_users() TO service_role;
+
+---
+
+## Registration Approval Workflow (real Rocket pattern)
+
+For apps that need admin approval before a user can log in — a `pending_registrations` table holds requests until approved.
+
+```sql
+CREATE TABLE public.pending_registrations (
+  id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  full_name   TEXT NOT NULL,
+  email       TEXT NOT NULL,
+  requested_at TIMESTAMPTZ DEFAULT NOW(),
+  status      TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  reviewed_by TEXT,
+  reviewed_at TIMESTAMPTZ
+);
+
+CREATE INDEX ON public.pending_registrations (email);
+CREATE INDEX ON public.pending_registrations (status);
+
+ALTER TABLE public.pending_registrations ENABLE ROW LEVEL SECURITY;
+-- Anyone can submit a request
+CREATE POLICY "anyone can register" ON public.pending_registrations FOR INSERT WITH CHECK (true);
+-- Admins can review
+CREATE POLICY "authenticated can manage" ON public.pending_registrations
+  FOR ALL USING (auth.role() = 'authenticated');
+```
+
+```typescript
+// Register page — insert into pending_registrations instead of auth.signUp
+const checkDuplicate = await supabase
+  .from('pending_registrations')
+  .select('id')
+  .eq('email', email)
+  .eq('status', 'pending')
+  .maybeSingle()
+
+if (!checkDuplicate.data) {
+  await supabase.from('pending_registrations').insert({
+    full_name: fullName,
+    email,
+    status: 'pending',
+  })
+}
+// Show "Request submitted — awaiting approval" message
+// Admin approves → then calls supabase.auth.admin.createUser()
+```
+
+---
+
+## Batch Upsert Pattern (large datasets)
+
+When syncing many rows, batch in chunks to avoid hitting Supabase request size limits.
+
+```typescript
+// Upsert in chunks of 200
+async function upsertAllRecords<T extends { id: string }>(
+  table: string,
+  records: T[],
+  chunkSize = 200
+): Promise<void> {
+  for (let i = 0; i < records.length; i += chunkSize) {
+    const chunk = records.slice(i, i + chunkSize)
+    const { error } = await supabase
+      .from(table)
+      .upsert(chunk, { onConflict: 'id' })
+    if (error) console.error(`Batch upsert error at offset ${i}:`, error)
+    // continue — don't throw, let other chunks succeed
+  }
+}
+```
+
+## Paginated Fetch Pattern (large tables)
+
+```typescript
+// Fetch first page fast, then load rest in background
+const INITIAL_LIMIT = 200
+const PAGE_SIZE = 500
+
+const { data: initial } = await supabase
+  .from('deals')
+  .select('*')
+  .order('created_at', { ascending: false })
+  .limit(INITIAL_LIMIT)
+
+setDeals(initial ?? [])
+
+// Background: fetch remaining pages
+let offset = INITIAL_LIMIT
+let hasMore = true
+while (hasMore) {
+  const { data: page } = await supabase
+    .from('deals')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .range(offset, offset + PAGE_SIZE - 1)
+  if (!page || page.length === 0) { hasMore = false; break }
+  setDeals(prev => [...prev, ...page])
+  offset += page.length
+  if (page.length < PAGE_SIZE) hasMore = false
+}
+```
 ```

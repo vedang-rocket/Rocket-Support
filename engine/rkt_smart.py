@@ -186,6 +186,7 @@ Output format matches CLAUDE.md spec:
     parser.add_argument("--preview-only", action="store_true", help="Show proposals and write no files")
     parser.add_argument("--non-interactive", action="store_true", help="Disable prompts; requires --yes or --preview-only")
     parser.add_argument("--quick", action="store_true", help="Zero-LLM fast path: chain_walker + brain.db only, skips semgrep/fingerprint")
+    parser.add_argument("--skip-semgrep", action="store_true", help="Skip semgrep pass in full diagnosis (for already-triaged runs)")
     return parser.parse_args()
 
 
@@ -392,10 +393,11 @@ def main():
     # Full diagnosis pipeline
     repo_path = os.path.abspath(os.path.expanduser(args.repo_path))
 
+    diag = {}
     if args.quick:
         findings = _quick_findings(repo_path, args.hint)
     else:
-        diag = engine.diagnose(repo_path, args.hint)
+        diag = engine.diagnose(repo_path, args.hint, skip_semgrep=args.skip_semgrep)
         findings = _build_normalized_findings(diag, repo_path)
     findings = fix_writer.dedupe_findings(findings)
     total_issues = len(findings)

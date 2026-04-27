@@ -15,6 +15,7 @@ import json
 import shutil
 import zipfile
 import datetime
+import re
 from typing import Any, Dict, List, Optional
 
 import sys
@@ -64,6 +65,61 @@ _CLEANUP_SUFFIXES = (".rkt_backup",)
 
 # Dirs to skip when building the output zip (keep .git — included in all zips)
 _ZIP_SKIP_DIRS = {"node_modules", ".next", "__pycache__"}
+
+_RKT_RULES_GITIGNORE_BLOCK_RE = re.compile(
+    r"\n?# rkt-rules — local dev setup \(never push\)\n"
+    r"\.cursor/\n"
+    r"CLAUDE\.md\n"
+    r"AGENTS\.md\n"
+    r"the-rocket-guide\.md\n"
+    r"TROUBLESHOOTING\.md\n"
+    r"memory-bank/\n"
+    r"graphify-out/\n"
+    r"\.claude-flow/\n"
+    r"\.swarm/\n"
+    r"code-review-graph/\n"
+    r"\.mcp\.json\n"
+    r"\.claude/commands/\n"
+    r"\.claude/agents/\n"
+    r"\.claude/helpers/\n"
+    r"\.claude/skills/\n"
+    r"\.claude/setup-plugins\.md\n"
+    r"\.claude/memory\.db\n"
+    r"\.claude/settings\.json\n?",
+    re.MULTILINE,
+)
+
+
+def _remove_rkt_rules_gitignore_block(workspace_path: str) -> bool:
+    """
+    Remove the managed rkt-rules block from .gitignore during delivery.
+    Returns True when a block was removed.
+    """
+    gitignore_path = os.path.join(workspace_path, ".gitignore")
+    if not os.path.isfile(gitignore_path):
+        return False
+
+    try:
+        with open(gitignore_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return False
+
+    cleaned = _RKT_RULES_GITIGNORE_BLOCK_RE.sub("\n", content)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip("\n")
+    if cleaned:
+        cleaned += "\n"
+
+    if cleaned == content:
+        return False
+
+    try:
+        with open(gitignore_path, "w", encoding="utf-8") as f:
+            f.write(cleaned)
+    except OSError:
+        return False
+
+    return True
 
 
 # ── Category inference ────────────────────────────────────────────────────────
@@ -180,6 +236,9 @@ def deliver(workspace_path: Optional[str] = None) -> Dict[str, Any]:
                         artifacts_removed.append(f"{entry.name}/{sub.name}/")
             except PermissionError:
                 pass
+
+    if _remove_rkt_rules_gitignore_block(workspace_path):
+        artifacts_removed.append(".gitignore:rkt-rules-block")
 
     # ── Step 3: Create zip inside fixed/ (sibling of working dir) ────────────
     # workspace_path = ~/Documents/Rocket/<project>/fixed/<project>/

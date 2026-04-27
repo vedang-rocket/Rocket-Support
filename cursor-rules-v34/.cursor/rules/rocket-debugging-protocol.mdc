@@ -317,6 +317,84 @@ grep -rn "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE" ./.env.local ./app ./lib
 
 ---
 
+## CLIENT-SIDE DATA LOADING DECISION TREE
+
+> Use this tree when data is empty / not loading in a dashboard or CRM-type project
+> where data fetching happens client-side (useEffect / hooks / context), not in Server Components.
+
+```
+Data is empty / not loading after login
+│
+├─ Is this a Client Component? ('use client' or uses useEffect/useState)
+│   └─ NO → Use DATABASE DEBUGGING tree above (server-side issue)
+│   └─ YES → continue below
+│
+├─ Is user null when the fetch runs?
+│   ├─ Check: add console.log(user) at the top of the useEffect that fetches data
+│   └─ user is null → fetch fires before auth state is set
+│       Fix: add [user] to useEffect dependency array
+│       Fix: add `if (!user) return` before supabase.from() call
+│       Fix: check AuthContext — is getUser() awaited before setLoading(false)?
+│
+├─ Fetch runs but returns 0 rows?
+│   ├─ Check RLS: authenticated users may lack SELECT policy
+│   │   Run: SELECT * FROM your_table LIMIT 5 in Supabase SQL editor (as postgres role)
+│   │   If it returns rows → RLS is blocking authenticated access → /fix-supabase-rls
+│   └─ Check the Supabase client: are you using createBrowserClient() in a Server Component?
+│       Only createBrowserClient() in 'use client' files; createServerClient() in server files
+│
+├─ Promise.allSettled has rejected entries?
+│   └─ Log each result: results.forEach(r => r.status === 'rejected' && console.error(r.reason))
+│   └─ Run each fetch individually to isolate which table fails
+│   └─ One failure should NOT block all others — if it does, you're using Promise.all not allSettled
+│
+├─ Data loads on first visit but is empty after navigation?
+│   ├─ useEffect dependency array is missing a key variable (e.g. [user] → add user)
+│   ├─ Component unmounts/remounts on route change → state resets → refetch needed
+│   └─ Check if the hook initialises state from localStorage on mount — stale value may take priority
+│
+├─ localStorage config is stale or corrupted?
+│   ├─ DevTools → Application tab → Local Storage → clear all keys for localhost
+│   ├─ Reload — if data now appears, localStorage had corrupt/stale config
+│   └─ Fix: add a schema version key; on mismatch, clear and reset to defaults
+│
+├─ Batch upsert silently failing?
+│   ├─ Add per-chunk error logging: if (error) console.error('chunk', i, error)
+│   ├─ Reduce chunk size from 200 → 50 (request may be hitting size limit)
+│   ├─ Check RLS INSERT/UPDATE policy for the table
+│   └─ Check if onConflict column is correct: .upsert(rows, { onConflict: 'id' })
+│
+├─ Data loads but shows stale/old values after an update?
+│   ├─ After upsert, always refetch from DB — never rely on optimistic state alone
+│   │   const { data: fresh } = await supabase.from('table').select().eq('id', id)
+│   │   setItems(prev => prev.map(x => x.id === id ? fresh[0] : x))
+│   └─ Check if another component/hook holds its own copy and doesn't re-subscribe
+│
+└─ camelCase/snake_case mismatch (TypeScript type ≠ DB column)?
+    ├─ Symptom: field is undefined even though row exists in DB
+    ├─ DB returns: first_name, client_id, created_at
+    └─ TypeScript expects: firstName, clientId, createdAt
+        Fix: add mapper functions rowToClient(row) / clientToRow(client)
+        These must be called on EVERY fetch result and before EVERY upsert
+```
+
+**Quick diagnostic for client-side data issues:**
+```bash
+# Check if data fetching is client-side (hooks/context)
+grep -rn "useEffect" src/hooks/ src/contexts/
+
+# Check if user guard exists before fetches
+grep -A5 "useEffect" src/hooks/useCRM.ts | grep -E "if.*user|user.*null"
+
+# Check localStorage keys that might be stale
+# DevTools → Application → Local Storage (manual check)
+
+# Confirm RLS allows authenticated reads
+# Supabase Dashboard → Table Editor → RLS → check policies
+```
+
+---
+
 ## ⚠️ CRITICAL — REPEATED AT BOTTOM
 
 Top causes of broken Rocket projects (in order):
@@ -329,4 +407,5 @@ Top causes of broken Rocket projects (in order):
 7. **Stripe raw body** → `request.json()` silently destroys webhook signature
 8. **Env vars missing in Netlify** → app works locally, broken in production
 9. **Missing profile trigger** → signup works, dashboard blank
+10. **useEffect fires before user is set** → data fetch runs with null user → empty state (TYPE H / dashboard apps)
 10. **Stripe test/live isolation** → products don't transfer between modes

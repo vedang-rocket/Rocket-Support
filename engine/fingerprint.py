@@ -136,6 +136,13 @@ def _score_project_type(repo_path: str, pkg: Dict[str, Any]) -> Dict[str, float]
         if file_hits > 0:
             score += 0.2
 
+        # Penalty: types that define specific deps but none are present.
+        # Landing intentionally has no deps (pure content signal), so skip it.
+        # For AI/Blog/SaaS/E-Commerce/Booking: if the type's identity is dep-driven
+        # and zero deps matched, halve the score to break ties correctly.
+        if signals["deps"] and dep_hits == 0 and score > 0:
+            score *= 0.5
+
         scores[ptype] = round(score, 3)
 
     return scores
@@ -275,8 +282,18 @@ def fingerprint(repo_path: str) -> Dict[str, Any]:
 
 
 def print_human(result: Dict[str, Any], repo_path: str = ""):
-    """Pretty-print fingerprint result to stdout."""
+    """Pretty-print fingerprint result using Rich (falls back to plain text)."""
     name = os.path.basename(repo_path or result.get("repo_path", ""))
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from format_output import print_fingerprint
+        print_fingerprint(result, name)
+        return
+    except Exception:
+        pass
+
+    # Fallback — plain text
     if name:
         print(f"\nProject:         {name}")
     print(f"Type:            {result['project_type']} (confidence: {result['confidence']:.0%})")

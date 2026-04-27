@@ -10,6 +10,10 @@
 - Never continuously check status after spawning a swarm — wait for results
 - ALWAYS read a file before editing it
 - NEVER commit secrets, credentials, or .env files
+- Return code first; explanations only if non-obvious
+- State bugs and fixes directly — no pre/post commentary
+- No docstrings or type hints on code not being changed
+- No speculative features or "you might also want..." suggestions
 
 ## File Organization
 

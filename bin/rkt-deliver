@@ -17,6 +17,110 @@ info() { echo -e "  ${BLUE}▸${NC} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
 fail() { echo -e "\n  ${RED}✗ ERROR:${NC} $1\n"; exit 1; }
 
+strip_rkt_gitignore_entries() {
+    local gitignore_path="$1/.gitignore"
+    [[ -f "$gitignore_path" ]] || return 0
+
+    local cleaned
+    cleaned=$("$PYTHON" - "$gitignore_path" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    lines = f.readlines()
+
+rkt_rules_block = {
+    "# rkt-rules — local dev setup (never push)",
+    ".cursor/",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "the-rocket-guide.md",
+    "TROUBLESHOOTING.md",
+    "memory-bank/",
+    "graphify-out/",
+    ".claude-flow/",
+    ".swarm/",
+    "code-review-graph/",
+    ".mcp.json",
+    ".claude/commands/",
+    ".claude/agents/",
+    ".claude/helpers/",
+    ".claude/skills/",
+    ".claude/setup-plugins.md",
+    ".claude/memory.db",
+    ".claude/settings.json",
+}
+
+rkt_main_start = "# ── rkt-main local dev tools — never push to GitHub ───────────"
+rkt_main_end = "# ──────────────────────────────────────────────────────────────"
+
+extra_cleanup_lines = {
+    "# Node modules",
+    "node_modules/",
+    "package-lock.json",
+    "# Next.js build output",
+    ".next/",
+    "out/",
+    "# Production build",
+    "build/",
+    "# Logs",
+    "npm-debug.log*",
+    "yarn-debug.log*",
+    "yarn-error.log*",
+    "pnpm-debug.log*",
+    "# OS-specific files",
+    ".DS_Store",
+    "Thumbs.db",
+    "# Vercel deployment",
+    ".vercel/",
+    "# Optional: if using TypeScript",
+    "*.tsbuildinfo",
+    "# Optional: if using testing tools",
+    "coverage/",
+    "jest-test-results.json",
+    "# Optional: if using IDEs",
+    ".vscode/",
+    ".idea/",
+    "# Optional: if using TurboRepo or monorepo",
+    "turbo/",
+    "# rkt internal",
+    ".rkt_snapshot/",
+    ".rkt_meta.json",
+    ".rkt_handoff_prompt.md",
+    "bun.lock",
+    "ruvector.db",
+}
+
+out = []
+in_main_block = False
+for raw in lines:
+    line = raw.rstrip("\n")
+    stripped = line.strip()
+
+    if stripped == rkt_main_start:
+        in_main_block = True
+        continue
+    if in_main_block:
+        if stripped == rkt_main_end:
+            in_main_block = False
+        continue
+    if stripped in rkt_rules_block:
+        continue
+    if stripped in extra_cleanup_lines:
+        continue
+    out.append(raw)
+
+new_content = "".join(out).rstrip() + "\n"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_content)
+
+print("ok")
+PYEOF
+)
+
+    [[ "$cleaned" == "ok" ]] && ok ".gitignore cleaned (rkt tooling entries removed)"
+}
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 show_help() {
@@ -69,7 +173,15 @@ if [[ -n "${1:-}" ]]; then
     WORKSPACE_PATH="$(realpath "$1" 2>/dev/null || echo "$1")"
     [[ ! -d "$WORKSPACE_PATH" ]] && fail "Workspace directory not found: $WORKSPACE_PATH"
 else
-    WORKSPACE_PATH=$("$PYTHON" - <<PYEOF
+    CWD_REAL="$(pwd -P 2>/dev/null || pwd)"
+    if [[ -d "$CWD_REAL" ]]; then
+        WORKSPACE_PATH="$CWD_REAL"
+    else
+        WORKSPACE_PATH=""
+    fi
+
+    if [[ -z "$WORKSPACE_PATH" ]]; then
+        WORKSPACE_PATH=$("$PYTHON" - <<PYEOF
 import sys
 sys.path.insert(0, "$ENGINE_DIR")
 import workspace
@@ -77,8 +189,11 @@ m = workspace.get_active_workspace()
 print(m['workspace_path'] if m else '')
 PYEOF
 )
+    fi
+
     if [[ -z "$WORKSPACE_PATH" ]]; then
-        echo -e "\n  ${RED}✗${NC} No active workspace. Run ${CYAN}rkt-triage${NC} first.\n"
+        echo -e "\n  ${RED}✗${NC} Could not resolve workspace from current directory or active workspace metadata.\n"
+        echo -e "  Pass an explicit path: ${CYAN}rkt-deliver /path/to/project${NC}\n"
         exit 1
     fi
 fi
@@ -86,6 +201,8 @@ fi
 echo ""
 info "Workspace: $WORKSPACE_PATH"
 echo ""
+
+strip_rkt_gitignore_entries "$WORKSPACE_PATH"
 
 # ── Deliver ───────────────────────────────────────────────────────────────────
 

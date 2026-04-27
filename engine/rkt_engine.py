@@ -24,6 +24,7 @@ import tempfile
 import datetime
 import time
 import re
+import concurrent.futures
 from typing import Dict, Any, List, Optional, Tuple
 
 # Add engine dir to path
@@ -35,6 +36,13 @@ import fingerprint as fp
 import chain_walker
 import schema_checker
 import context_extractor
+import format_output as fmt_out
+
+try:
+    import probe_scanner as _probe_scanner
+    _PROBE_AVAILABLE = True
+except ImportError:
+    _PROBE_AVAILABLE = False
 
 RULES_DIR = os.path.join(ENGINE_DIR, "rules")
 RKT_HOME = os.path.expanduser("~/rocket-support")
@@ -509,94 +517,67 @@ def _print_all_findings(
     has_any = bool(cw_findings or semgrep_findings or fs_issues or db_match or schema_failures)
 
     if not has_any:
-        print(INFO("No issues detected across all layers."), flush=True)
-        print(f"{_c('1;33', f'Run:  rkt {repo_name}  for full Claude diagnosis')}", flush=True)
+        fmt_out.print_summary(repo_name, 0)
         return
 
-    print(f"\n{_c('1;32', '── Findings Summary ──')}", flush=True)
+    total = len(cw_findings) + len(semgrep_findings) + len(fs_issues) + len(schema_failures) + (1 if db_match else 0)
 
-    # 1. ROOT CAUSE — chain walker breaks (highest confidence, shown first)
+    # 1. ROOT CAUSE — chain walker breaks
     if cw_findings:
-        print(f"\n{_c('1;31', 'ROOT CAUSE (chain_walker — confidence 1.0):')}", flush=True)
+        fmt_out.print_section_header("ROOT CAUSE", len(cw_findings), "bright_red")
         for cw in cw_findings:
             conf = _classify_confidence(cw, "chain_walker")
-            print(f"\n  {_CONF_LABEL[conf]}", flush=True)
-            print(f"  [{cw['chain']}] {cw['broken_at']}", flush=True)
-            print(f"  Issue:    {_redact_sensitive_text(cw['issue'])}", flush=True)
-            print(f"  Missing:  {cw['missing']}", flush=True)
-            print(f"  Fix:      {_redact_sensitive_text(cw['fix_hint'])}", flush=True)
-            # Context window around the break location
-            abs_path = os.path.join(repo_path, cw["broken_at"])
-            anchor = context_extractor.find_anchor_line(abs_path, cw["missing"])
+            cw_safe = {k: _redact_sensitive_text(str(v)) if isinstance(v, str) else v for k, v in cw.items()}
+            abs_path = os.path.join(repo_path, cw.get("broken_at", ""))
+            anchor = context_extractor.find_anchor_line(abs_path, cw.get("missing", ""))
             ctx = context_extractor.extract_context(abs_path, anchor, window=15)
-            block = context_extractor.format_context_block(ctx)
+            block = _redact_sensitive_text(context_extractor.format_context_block(ctx))
             if block:
-                print(_redact_sensitive_text(block), flush=True)
+                cw_safe["fix_hint"] = f"{cw_safe.get('fix_hint', '')}\n\n{block}"
+            fmt_out.print_cw_finding(cw_safe, conf)
 
-    # 1b. SCHEMA ISSUES — SQL migration checks
+    # 1b. SCHEMA ISSUES
     if schema_failures:
-        print(f"\n{_c('1;33', f'SCHEMA ISSUES ({len(schema_failures)} missing pattern(s)):')}", flush=True)
+        fmt_out.print_section_header("SCHEMA ISSUES", len(schema_failures), "dark_orange")
         for sf in schema_failures:
-            print(f"  [MED ] [SCHEMA] {sf['check']}", flush=True)
-            print(f"    {_redact_sensitive_text(sf['fix_hint'])}", flush=True)
+            sf_safe = {k: _redact_sensitive_text(str(v)) if isinstance(v, str) else v for k, v in sf.items()}
+            fmt_out.print_schema_finding(sf_safe)
 
-    # 2. ADDITIONAL ISSUES — semgrep violations
+    # 2. ADDITIONAL ISSUES — semgrep
     if semgrep_findings:
-        print(f"\n{_c('1;33', f'ADDITIONAL ISSUES (semgrep — {len(semgrep_findings)} violation(s)):')}", flush=True)
+        fmt_out.print_section_header("ADDITIONAL ISSUES", len(semgrep_findings), "bright_yellow")
         for f in semgrep_findings:
-            conf  = _classify_confidence(f, "semgrep")
-            rule  = f.get("check_id", "").split(".")[-1]
-            path  = f.get("path", "")
-            line  = f.get("start", {}).get("line", "?")
-            msg   = f.get("extra", {}).get("message", "").split("\n")[0][:90]
-            fix   = f.get("extra", {}).get("fix", "")
-            print(f"\n  {_CONF_LABEL[conf]}", flush=True)
-            print(f"  [{rule}] {path}:{line}", flush=True)
-            print(f"    {_redact_sensitive_text(msg)}", flush=True)
-            if fix:
-                print(f"    autofix: {_redact_sensitive_text(fix[:70])}", flush=True)
-            # Context window around the violation line
+            conf = _classify_confidence(f, "semgrep")
+            line = f.get("start", {}).get("line", "?")
+            ctx_block = ""
             if isinstance(line, int):
+                path = f.get("path", "")
                 ctx = context_extractor.extract_context(path, line, window=10)
-                block = context_extractor.format_context_block(ctx)
-                if block:
-                    print(_redact_sensitive_text(block), flush=True)
+                ctx_block = _redact_sensitive_text(context_extractor.format_context_block(ctx))
+            fmt_out.print_semgrep_finding(f, conf, ctx_block)
 
+    # 3. FILE-SYSTEM ISSUES
     if fs_issues:
-        print(f"\n{_c('1;33', f'FILE-SYSTEM ISSUES ({len(fs_issues)}):')}", flush=True)
+        fmt_out.print_section_header("FILE-SYSTEM ISSUES", len(fs_issues), "bright_yellow")
         for issue in fs_issues:
             conf = _classify_confidence(issue, "fs")
-            print(f"\n  {_CONF_LABEL[conf]}", flush=True)
-            print(f"  [{issue['rule']}] {issue['message']}", flush=True)
-            print(f"    fix: {_redact_sensitive_text(issue['fix'])}", flush=True)
+            issue_safe = {k: _redact_sensitive_text(str(v)) if isinstance(v, str) else v for k, v in issue.items()}
+            fmt_out.print_fs_finding(issue_safe, conf)
 
-    # 3. KNOWN FIX — database match
+    # 4. KNOWN FIX — database match
     if db_match:
-        score = db_match.get("_score", 0)
-        uses_count = db_match.get("uses", 0)
-        print(f"\n{_c('1;34', f'KNOWN FIX (database — {score:.0%} similarity, used {uses_count}x):')}", flush=True)
-        print(f"  Pattern:   {db_match.get('pattern', '')[:80]}", flush=True)
-        print(
-            f"  Signature: {_redact_sensitive_text(db_match.get('error_signature', '')[:80])}",
-            flush=True,
-        )
-        diff = db_match.get("fix_diff", "")
-        if diff:
-            print(f"\n{_redact_sensitive_text(diff[:400])}", flush=True)
+        fmt_out.print_db_match(db_match)
 
-    # 4. RELEVANT DOCS — KB search hits
+    # 5. RELEVANT DOCS — KB hits
     if kb_hits:
-        print(f"\n{_c('1;36', 'RELEVANT DOCS (kb_search):')}", flush=True)
-        for hit in kb_hits:
-            print(f"  [{hit['source']}]  score={hit['score']:.3f}", flush=True)
-            print(f"  {_redact_sensitive_text(hit['chunk'][:400])}", flush=True)
+        fmt_out.print_kb_hits(kb_hits)
 
-    print(f"\n{_c('1;33', f'Run:  rkt {repo_name}  for full Claude diagnosis')}", flush=True)
+    fmt_out.print_summary(repo_name, total)
 
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
-def diagnose(repo_path: str, hint: str = "") -> Dict[str, Any]:
+def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict[str, Any]:
     """
     Full diagnosis pipeline.
     Returns dict with all findings and the diagnosis output.
@@ -618,6 +599,7 @@ def diagnose(repo_path: str, hint: str = "") -> Dict[str, Any]:
         "method": None,  # "chain_walker" | "semgrep" | "db" | "claude"
         "output": "",
         "timestamp": datetime.datetime.utcnow().isoformat(),
+        "skip_semgrep": bool(skip_semgrep),
     }
 
     # ── Layer 0: Chain walker ─────────────────────────────────────────────────
@@ -667,8 +649,14 @@ def diagnose(repo_path: str, hint: str = "") -> Dict[str, Any]:
         else:
             print(OK(f"schema_checker: {elapsed_sc:.1f}ms — all patterns present"), flush=True)
 
-    # ── Layer 1: Fingerprint ──────────────────────────────────────────────────
+    # ── Layer 1: Fingerprint + probe_scanner (parallel) ───────────────────────
     print(STEP("1/3 Fingerprinting project"), flush=True)
+    _probe_future = None
+    _probe_executor = None
+    if not skip_semgrep and _PROBE_AVAILABLE:
+        _probe_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        _probe_future = _probe_executor.submit(_probe_scanner.run_probe_scanner, repo_path)
+
     t1 = time.perf_counter()
     fingerprint_result = fp.fingerprint(repo_path)
     result["fingerprint"] = fingerprint_result
@@ -690,33 +678,48 @@ def diagnose(repo_path: str, hint: str = "") -> Dict[str, Any]:
         )
     print(INFO(f"Most likely failure: {fingerprint_result['common_failure']}"), flush=True)
 
-    # ── Layer 1: Semgrep ──────────────────────────────────────────────────────
-    print(STEP("2/3 Running Semgrep autofix scan"), flush=True)
+    # ── Layer 1: probe_scanner (ast-grep-py + rg) ─────────────────────────────
+    print(STEP("2/3 Running probe_scanner"), flush=True)
     t2 = time.perf_counter()
-    semgrep_result = run_semgrep(repo_path, autofix=False)
-    result["semgrep"] = semgrep_result
-
-    elapsed_sg = (time.perf_counter() - t2) * 1000
-    if not semgrep_result.get("available"):
-        print(WARN(f"semgrep not available — skipping (install: pip install semgrep)"), flush=True)
-    else:
-        findings = semgrep_result.get("findings", [])
-        if findings:
-            print(INFO(f"Found {len(findings)} issue(s) via semgrep:"), flush=True)
-            print(format_semgrep_findings(findings), flush=True)
-
-            # Apply autofixes
-            print(INFO("Applying semgrep autofixes..."), flush=True)
-            autofix_result = run_semgrep(repo_path, autofix=True)
-            if autofix_result.get("findings") is not None:
-                fixed_count = len(autofix_result.get("findings", []))
-                print(OK(f"Semgrep applied {len(findings) - fixed_count} autofix(es)"), flush=True)
+    if skip_semgrep:
+        semgrep_result = {
+            "available": True,
+            "findings": [],
+            "errors": [],
+            "autofix_applied": False,
+            "skipped": True,
+            "skip_reason": "requested by caller",
+        }
+        elapsed_sg = (time.perf_counter() - t2) * 1000
+        print(INFO(f"probe_scanner: skipped ({elapsed_sg:.0f}ms) — requested by caller"), flush=True)
+    elif _probe_future is not None:
+        try:
+            semgrep_result = _probe_future.result(timeout=10)
+        except Exception as _e:
+            semgrep_result = {"available": False, "findings": [], "errors": [str(_e)]}
+        finally:
+            if _probe_executor:
+                _probe_executor.shutdown(wait=False)
+        elapsed_sg = (time.perf_counter() - t2) * 1000
+        _n = len(semgrep_result.get("findings", []))
+        if _n:
+            print(INFO(f"probe_scanner: {elapsed_sg:.0f}ms — {_n} issue(s) found"), flush=True)
+            print(format_semgrep_findings(semgrep_result["findings"]), flush=True)
         else:
-            errors = semgrep_result.get("errors", [])
-            if errors:
-                print(WARN(f"Semgrep ran with {len(errors)} parse error(s) (non-fatal)"), flush=True)
+            print(OK(f"probe_scanner: {elapsed_sg:.0f}ms — no violations"), flush=True)
+    else:
+        semgrep_result = run_semgrep(repo_path, autofix=False)
+        elapsed_sg = (time.perf_counter() - t2) * 1000
+        if not semgrep_result.get("available"):
+            print(WARN("semgrep not available — skipping (install: pip install semgrep)"), flush=True)
+        else:
+            _n = len(semgrep_result.get("findings", []))
+            if _n:
+                print(INFO(f"semgrep: {elapsed_sg:.0f}ms — {_n} issue(s)"), flush=True)
+                print(format_semgrep_findings(semgrep_result["findings"]), flush=True)
             else:
-                print(OK(f"Semgrep: no violations ({elapsed_sg:.0f}ms)"), flush=True)
+                print(OK(f"semgrep: {elapsed_sg:.0f}ms — no violations"), flush=True)
+    result["semgrep"] = semgrep_result
 
     # ── Step 2b: File-system checks ──────────────────────────────────────────
     fs_issues = fs_checks(repo_path)
@@ -725,6 +728,14 @@ def diagnose(repo_path: str, hint: str = "") -> Dict[str, Any]:
         print(INFO(f"File-system checks: {len(fs_issues)} issue(s):"), flush=True)
         for issue in fs_issues:
             print(f"  [{issue['severity']}] [{issue['rule']}] {issue['message']}", flush=True)
+
+    # Dedup: probe_scanner and fs_checks both catch NEXT_PUBLIC_ secrets
+    _fs_rule_ids = {i.get("rule", "") for i in fs_issues}
+    if "ROCKET-6" in _fs_rule_ids:
+        _deduped = [f for f in semgrep_result.get("findings", [])
+                    if "next-public" not in f.get("check_id", "")]
+        semgrep_result = {**semgrep_result, "findings": _deduped}
+        result["semgrep"] = semgrep_result
 
     # ── Layer 2: Database lookup ──────────────────────────────────────────────
     print(STEP("3/3 Checking fix database"), flush=True)

@@ -119,7 +119,36 @@ const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
 ```
 When working on a project, check Dashboard → Settings → API to confirm key format.
 
-### ❌ 8. NEVER produce diffs containing `// ... existing code ...`
+### ❌ 8. NEVER create an auth file if one already exists — EDIT it instead
+
+Before creating any auth-related file, run this check:
+
+```bash
+# Check ALL possible locations before creating anything
+ls middleware.ts src/middleware.ts 2>/dev/null
+ls lib/supabase/middleware.ts lib/supabase/session.ts 2>/dev/null
+ls lib/supabase/server.ts lib/supabase/client.ts 2>/dev/null
+ls contexts/AuthContext.tsx context/AuthContext.tsx src/contexts/AuthContext.tsx 2>/dev/null
+ls app/auth/callback/route.ts src/app/auth/callback/route.ts 2>/dev/null
+```
+
+**If the file exists → edit it. Never create a parallel version.**
+
+- `lib/supabase/session.ts` and `lib/supabase/middleware.ts` serve the same purpose — edit whichever is already there, never create the other
+- `middleware.ts` at root and `src/middleware.ts` are the same file in different project layouts — edit the one that exists
+- If `middleware.ts` already imports `updateSession` from any path → fix what's broken inside it, do NOT change the import path or recreate the file
+- Only create a file if it is genuinely absent from every location above
+
+```
+❌ WRONG: creating middleware.ts when src/middleware.ts already exists
+❌ WRONG: creating lib/supabase/middleware.ts when lib/supabase/session.ts exists
+✅ CORRECT: editing src/middleware.ts to fix the updateSession() call
+✅ CORRECT: editing lib/supabase/session.ts to fix the cookie logic
+```
+
+---
+
+### ❌ 9. NEVER produce diffs containing `// ... existing code ...`
 ```typescript
 // ❌ FORBIDDEN — this silently deletes the code it replaces
 function example() {
@@ -305,6 +334,28 @@ export const dynamic = 'force-dynamic' // ✅ always fresh, never cached
 ---
 
 ## BEHAVIORAL RULES — HOW TO OPERATE
+
+### Probe-First Code Analysis Protocol (MANDATORY)
+
+When analyzing code, ALWAYS follow this order:
+
+1. Start with Probe (semantic retrieval first)
+   - Use `probe "<query>"` to find relevant files and symbols
+   - Prefer semantic intent queries such as `"auth middleware"` or `"api handler"`
+2. Expand each promising hit with structure-aware context
+   - Use `probe extract <file>:<line>` for each relevant result
+   - Read the full function/class context before drawing conclusions
+3. Then run exact verification checks
+   - Use `rg` only after Probe + Extract to verify exact patterns
+   - Typical checks: `getSession`, `NEXT_PUBLIC`, `request.json`
+
+NEVER scan the entire repo blindly when a targeted semantic query can localize scope.
+NEVER rely only on string search for understanding behavior.
+
+Goal:
+- Minimize noise
+- Maximize relevant context
+- Use structural understanding before pattern matching
 
 ### Rules Transparency (Reduces Hallucinations)
 At the start of every response that involves code changes, state:

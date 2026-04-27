@@ -41,30 +41,47 @@ def _try_sentence_transformers(text: str) -> Optional[List[float]]:
     return vec.tolist()
 
 
-def _embed(text: str) -> Optional[List[float]]:
-    """Embed text. Tries sentence-transformers first, then TF-IDF projection."""
-    # Try sentence-transformers (optional, requires torch)
-    st_vec = _try_sentence_transformers(text)
-    if st_vec:
-        return st_vec
-    # Fall back to TF-IDF character n-gram hashing (deterministic, no corpus needed)
+def _numpy_char_ngram_embed(text: str, n_features: int = 128) -> Optional[List[float]]:
+    """
+    Pure numpy character n-gram hashing — same algorithm as sklearn HashingVectorizer
+    but avoids the 3-4s sklearn import cost on Python 3.14.
+    """
     try:
-        from sklearn.feature_extraction.text import HashingVectorizer
-        v = HashingVectorizer(n_features=128, analyzer="char_wb", ngram_range=(3, 4), norm="l2")
-        arr = v.transform([text]).toarray()[0]
-        return arr.tolist()
+        import numpy as np
+        vec = np.zeros(n_features, dtype=float)
+        padded = f" {text.lower()} "
+        for n in (3, 4):
+            for i in range(len(padded) - n + 1):
+                bucket = hash(padded[i:i + n]) % n_features
+                vec[bucket] += 1.0
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec /= norm
+        return vec.tolist()
     except Exception:
         return None
 
 
+def _embed(text: str) -> Optional[List[float]]:
+    """Embed text. Tries sentence-transformers first, then numpy char-ngram hashing."""
+    st_vec = _try_sentence_transformers(text)
+    if st_vec:
+        return st_vec
+    return _numpy_char_ngram_embed(text)
+
+
 def _cosine(a: List[float], b: List[float]) -> float:
-    import math
-    dot = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0 or mag_b == 0:
-        return 0.0
-    return dot / (mag_a * mag_b)
+    try:
+        import numpy as np
+        va, vb = np.array(a, dtype=float), np.array(b, dtype=float)
+        denom = np.linalg.norm(va) * np.linalg.norm(vb)
+        return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
+    except Exception:
+        import math
+        dot = sum(x * y for x, y in zip(a, b))
+        mag_a = math.sqrt(sum(x * x for x in a))
+        mag_b = math.sqrt(sum(x * x for x in b))
+        return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
 
 
 def get_conn() -> sqlite3.Connection:
