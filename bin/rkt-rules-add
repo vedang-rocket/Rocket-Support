@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-rules-add
+#  Copies cursor-rules-v34 into the active remote project
+# ============================================================
+
+SSH_HOST="support-vedang-patel"
+REMOTE_APP_DIR="/home/ubuntu/app"
+V34_DIR="$HOME/rocket-support/cursor-rules-v34"
+
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RED='\033[0;31m'; NC='\033[0m'
+ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
+info() { echo -e "  ${CYAN}▸${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
+fail() { echo -e "  ${RED}✗${NC}  $1"; exit 1; }
+
+echo ""
+echo -e "${BOLD}${CYAN}── rkt-rules-add ─────────────────────────────────────────${NC}"
+echo ""
+
+# ── Verify source exists ──────────────────────────────────────
+[[ -d "$V34_DIR/.cursor" ]] || fail "cursor-rules-v34 not found at $V34_DIR"
+
+# ── Detect active project ─────────────────────────────────────
+info "Detecting active project on ${BOLD}$SSH_HOST${NC}..."
+PROJECT_FOLDER=$(TERM=xterm-256color ssh "$SSH_HOST" "ls -t $REMOTE_APP_DIR 2>/dev/null | head -1")
+
+if [[ -z "$PROJECT_FOLDER" ]]; then
+  fail "No active project found in $REMOTE_APP_DIR on $SSH_HOST"
+fi
+
+REMOTE_PROJECT_PATH="$REMOTE_APP_DIR/$PROJECT_FOLDER"
+ok "Active project: ${BOLD}$PROJECT_FOLDER${NC}"
+
+# ── Count files for summary (local, free) ────────────────────
+RULE_COUNT=$(ls "$V34_DIR/.cursor/rules/"    2>/dev/null | wc -l | tr -d ' ')
+CMD_COUNT=$(ls  "$V34_DIR/.cursor/commands/" 2>/dev/null | wc -l | tr -d ' ')
+HOOK_COUNT=$(ls "$V34_DIR/.cursor/hooks/"    2>/dev/null | wc -l | tr -d ' ')
+SKILL_COUNT=$(ls "$V34_DIR/.cursor/skills/"  2>/dev/null | wc -l | tr -d ' ')
+AGENT_COUNT=$(ls "$V34_DIR/agents/"          2>/dev/null | wc -l | tr -d ' ')
+CTX_COUNT=$(ls   "$V34_DIR/contexts/"        2>/dev/null | wc -l | tr -d ' ')
+
+# ── Single tar | ssh transfer ─────────────────────────────────
+info "Transferring all rules in one shot..."
+
+COPYFILE_DISABLE=1 tar czf - \
+  -C "$V34_DIR" \
+  --exclude='.DS_Store' \
+  .cursor agents contexts \
+  AGENTS.md the-rocket-guide.md TROUBLESHOOTING.md cursor.config components.json \
+| TERM=xterm-256color ssh "$SSH_HOST" "tar xzf - -C '$REMOTE_PROJECT_PATH' 2>/dev/null"
+
+if [[ $? -ne 0 ]]; then
+  fail "Transfer failed"
+fi
+
+ok ".cursor/ → $RULE_COUNT rules · $CMD_COUNT commands · $HOOK_COUNT hooks · $SKILL_COUNT skills"
+ok "agents/ ($AGENT_COUNT) · contexts/ ($CTX_COUNT) · 5 root files"
+
+# ── Update remote .gitignore ──────────────────────────────────
+info "Updating .gitignore..."
+TERM=xterm-256color ssh "$SSH_HOST" "
+  cd '$REMOTE_PROJECT_PATH' || exit 1
+  if ! grep -qF '# rkt-rules (local dev only)' .gitignore 2>/dev/null; then
+    cat >> .gitignore << 'GITEOF'
+
+# rkt-rules (local dev only)
+.cursor/
+agents/
+contexts/
+AGENTS.md
+the-rocket-guide.md
+TROUBLESHOOTING.md
+cursor.config
+components.json
+GITEOF
+  fi
+"
+ok ".gitignore updated"
+
+# ── Summary ───────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}  Cursor rules installed → $REMOTE_PROJECT_PATH${NC}"
+echo -e "  .cursor/ ($RULE_COUNT rules · $CMD_COUNT commands · $HOOK_COUNT hooks · $SKILL_COUNT skills)"
+echo -e "  agents/ ($AGENT_COUNT) · contexts/ ($CTX_COUNT) · 5 root files"
+echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""

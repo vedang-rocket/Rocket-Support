@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-done
+#  Finish a support session:
+#  - rocket push on container
+#  - rocket clean on container
+#  - closes left pane (serve), keeps right pane clean
+# ============================================================
+
+SSH_HOST="support-vedang-patel"
+REMOTE_APP_DIR="/home/ubuntu/app"
+
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RED='\033[0;31m'; NC='\033[0m'
+ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
+info() { echo -e "  ${CYAN}▸${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
+fail() { echo -e "  ${RED}✗${NC}  $1"; exit 1; }
+
+echo ""
+echo -e "${BOLD}${CYAN}── rkt-done ──────────────────────────────────────────${NC}"
+echo ""
+
+# ── Check active project ─────────────────────────────────────
+ACTIVE_PROJECT=$(TERM=xterm-256color ssh "$SSH_HOST" "ls $REMOTE_APP_DIR 2>/dev/null | head -1")
+
+if [[ -z "$ACTIVE_PROJECT" ]]; then
+  fail "No active project found on container. Nothing to push."
+fi
+
+info "Active project: ${BOLD}$ACTIVE_PROJECT${NC}"
+echo ""
+warn "This will push and clean: ${BOLD}$ACTIVE_PROJECT${NC}"
+echo ""
+echo -ne "  ${BOLD}Are you sure? [y/N]:${NC} "
+read -r CONFIRM
+
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  info "Cancelled."
+  exit 0
+fi
+
+# ── Remove cursor rules before push ──────────────────────────
+info "Removing cursor rules..."
+"$(dirname "$0")/rkt-rules-remove" --yes
+
+# ── rocket push ──────────────────────────────────────────────
+echo ""
+info "Running rocket push..."
+PUSH_OUTPUT=$(TERM=xterm-256color ssh "$SSH_HOST" "echo 'y' | rocket push 2>&1")
+echo "$PUSH_OUTPUT"
+
+# Check push succeeded
+if echo "$PUSH_OUTPUT" | grep -q '"code":"OK"'; then
+  ok "Push successful!"
+else
+  warn "Push may have failed — check output above"
+  echo -ne "  ${BOLD}Continue to clean anyway? [y/N]:${NC} "
+  read -r FORCE
+  if [[ ! "$FORCE" =~ ^[Yy]$ ]]; then
+    info "Stopped before clean. Fix push issue then run rkt-done again."
+    exit 1
+  fi
+fi
+
+# ── rocket clean ─────────────────────────────────────────────
+echo ""
+info "Running rocket clean..."
+TERM=xterm-256color ssh "$SSH_HOST" "echo 'y' | rocket clean 2>&1"
+ok "Container cleaned and reset!"
+
+# ── Close left pane (serve pane) via AppleScript ─────────────
+info "Closing serve pane..."
+
+osascript <<APPLESCRIPT
+tell application "Ghostty"
+  activate
+  delay 0.2
+  tell application "System Events"
+    tell process "Ghostty"
+      -- Focus left pane
+      keystroke "[" using {command down, control down}
+      delay 0.3
+      -- Close it (Cmd+W closes current pane)
+      keystroke "w" using command down
+    end tell
+  end tell
+end tell
+APPLESCRIPT
+
+echo ""
+echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}  Done! $ACTIVE_PROJECT pushed and cleaned.${NC}"
+echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo -e "  Start next ticket:  ${CYAN}rkt-ok <threadId>${NC}"
+echo ""

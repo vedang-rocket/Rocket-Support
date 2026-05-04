@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-ok <threadId>
+# ============================================================
+
+THREAD_ID="${1:-}"
+SSH_HOST="support-vedang-patel"
+REMOTE_APP_DIR="/home/ubuntu/app"
+
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RED='\033[0;31m'; NC='\033[0m'
+ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
+info() { echo -e "  ${CYAN}▸${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
+fail() { echo -e "  ${RED}✗${NC}  $1"; exit 1; }
+
+if [[ -z "$THREAD_ID" ]]; then
+  echo -e "\n  ${BOLD}Usage:${NC}  rkt-ok <threadId>"
+  echo -e "  ${BOLD}Example:${NC} rkt-ok 69ef38fed5122300149162c6\n"
+  exit 1
+fi
+
+info "Starting support session for thread: ${BOLD}$THREAD_ID${NC}"
+
+# ── Step 1: Clean any existing project ───────────────────────
+info "Cleaning existing project on container..."
+TERM=xterm-256color ssh "$SSH_HOST" "echo 'y' | rocket clean 2>&1" || true
+
+# ── Step 2: Run rocket init ───────────────────────────────────
+info "Running rocket init..."
+INIT_OUTPUT=$(TERM=xterm-256color ssh "$SSH_HOST" "rocket init $THREAD_ID 2>&1")
+echo "$INIT_OUTPUT"
+
+if ! echo "$INIT_OUTPUT" | grep -q '"code":"OK"'; then
+  fail "rocket init failed — check output above"
+fi
+
+# ── Step 3: Detect project folder ────────────────────────────
+info "Detecting project folder..."
+PROJECT_FOLDER=$(TERM=xterm-256color ssh "$SSH_HOST" "ls -t $REMOTE_APP_DIR 2>/dev/null | head -1")
+
+if [[ -z "$PROJECT_FOLDER" ]]; then
+  fail "Could not detect project folder in ~/app"
+fi
+
+REMOTE_PROJECT_PATH="$REMOTE_APP_DIR/$PROJECT_FOLDER"
+ok "Project folder: ${BOLD}$PROJECT_FOLDER${NC}"
+
+# ── Step 3b: Install cursor rules ────────────────────────────
+info "Installing cursor rules..."
+"$(dirname "$0")/rkt-rules-add"
+
+# ── Step 4: Open Cursor remotely ─────────────────────────────
+info "Opening project in Cursor..."
+cursor --remote "ssh-remote+$SSH_HOST" "$REMOTE_PROJECT_PATH" &
+
+# ── Step 5: Write launcher scripts ───────────────────────────
+LEFT_SCRIPT="/tmp/rkt-left-$THREAD_ID.sh"
+RIGHT_SCRIPT="/tmp/rkt-right-$THREAD_ID.sh"
+
+cat > "$LEFT_SCRIPT" << EOF
+#!/usr/bin/env bash
+TERM=xterm-256color ssh $SSH_HOST -t 'export TERM=xterm-256color && cd $REMOTE_PROJECT_PATH && npm install && npm run build && npm run serve'
+EOF
+
+cat > "$RIGHT_SCRIPT" << EOF
+#!/usr/bin/env bash
+TERM=xterm-256color ssh $SSH_HOST -t 'export TERM=xterm-256color && cd $REMOTE_PROJECT_PATH && exec bash'
+EOF
+
+chmod +x "$LEFT_SCRIPT" "$RIGHT_SCRIPT"
+
+# ── Step 6: Open Ghostty split ───────────────────────────────
+info "Opening Ghostty split panes..."
+
+osascript <<APPLESCRIPT
+tell application "Ghostty"
+  activate
+  delay 0.3
+  set win to front window
+  tell application "System Events"
+    tell process "Ghostty"
+      keystroke "bash $LEFT_SCRIPT"
+      keystroke return
+      delay 0.5
+      keystroke "d" using command down
+      delay 0.8
+      keystroke "bash $RIGHT_SCRIPT"
+      keystroke return
+      delay 0.5
+      keystroke "[" using {command down, control down}
+    end tell
+  end tell
+end tell
+APPLESCRIPT
+
+echo ""
+ok "Session ready! — ${BOLD}$PROJECT_FOLDER${NC}"
+echo ""
+echo -e "  ${BOLD}Left pane${NC}  → npm install → build → serve"
+echo -e "  ${BOLD}Right pane${NC} → ready for rocket commands"
+echo -e "  ${BOLD}Cursor${NC}     → opening project remotely"
+echo ""
+echo -e "  When done:  ${CYAN}rkt-done${NC}"
+echo ""
