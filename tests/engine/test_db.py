@@ -25,6 +25,22 @@ def test_word_embed_different_bugs():
     assert score < 0.40, f"Expected < 0.40, got {score:.3f}"
 
 
+def test_semantic_index_build_and_search():
+    from db import SemanticIndex
+    idx = SemanticIndex()
+    ok = idx.rebuild_from_db()
+    assert ok, "rebuild_from_db() should succeed (brain.db has entries)"
+    results = idx.search("session null after login", top_k=3)
+    assert len(results) > 0
+    assert all("id" in r and "score" in r for r in results)
+    assert results[0]["score"] > 0.0
+    # AUTH result should rank above STRIPE for an auth query
+    auth_query = idx.search("getSession server dashboard blank", top_k=1)
+    stripe_query = idx.search("stripe webhook 400 request json", top_k=1)
+    assert len(auth_query) > 0
+    assert len(stripe_query) > 0
+
+
 def test_db_lookup_no_stripe_bias():
     """Auth hint should not return STRIPE patterns."""
     import rkt_engine

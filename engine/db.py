@@ -45,7 +45,7 @@ def _numpy_word_embed(text: str, n_features: int = 512) -> Optional[List[float]]
     """
     Word unigram + bigram hashing into n_features buckets.
     Replaces char n-gram — captures 'getSession' as a token, not character fragments.
-    Same bug described differently (blank/empty, login/signup) scores 0.4-0.6 vs 0.05.
+    Uses hashlib.md5 for deterministic hashing (Python's hash() is PYTHONHASHSEED-dependent).
     """
     try:
         import re as _re
@@ -53,10 +53,12 @@ def _numpy_word_embed(text: str, n_features: int = 512) -> Optional[List[float]]
         vec = np.zeros(n_features, dtype=float)
         tokens = _re.sub(r"[^\w]", " ", text.lower()).split()
         for tok in tokens:
-            vec[hash(tok) % n_features] += 1.0
+            bucket = int(hashlib.md5(tok.encode()).hexdigest(), 16) % n_features
+            vec[bucket] += 1.0
         for i in range(len(tokens) - 1):
             bigram = f"{tokens[i]} {tokens[i+1]}"
-            vec[hash(bigram) % n_features] += 1.0
+            bucket = int(hashlib.md5(bigram.encode()).hexdigest(), 16) % n_features
+            vec[bucket] += 1.0
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec /= norm
@@ -85,6 +87,146 @@ def _cosine(a: List[float], b: List[float]) -> float:
         mag_a = math.sqrt(sum(x * x for x in a))
         mag_b = math.sqrt(sum(x * x for x in b))
         return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
+
+
+# ── Semantic index (usearch + TF-IDF LSA) ────────────────────────────────────
+
+class SemanticIndex:
+    """
+    Semantic index using usearch ANN + sklearn TF-IDF LSA.
+    Stored at ~/.rocket-support/brain.usearch + brain.tfidf.pkl
+    Falls back gracefully if usearch/sklearn not available.
+    """
+    INDEX_PATH = os.path.expanduser("~/.rocket-support/brain.usearch")
+    TFIDF_PATH = os.path.expanduser("~/.rocket-support/brain.tfidf.pkl")
+    DIM = 64  # LSA components — sufficient for ~30-200 docs
+
+    def __init__(self):
+        self._index = None
+        self._vectorizer = None
+        self._svd = None
+        self._id_map: List[Any] = []
+
+    def rebuild_from_db(self) -> bool:
+        """Fit TF-IDF + SVD on all brain.db entries, build usearch index."""
+        try:
+            import numpy as np
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.decomposition import TruncatedSVD
+            from usearch.index import Index
+            import pickle
+
+            init_db()
+            conn = get_conn()
+            rows = conn.execute(
+                "SELECT id, pattern, error_signature, category FROM fixes"
+            ).fetchall()
+            conn.close()
+
+            if not rows:
+                return False
+
+            self._id_map = []
+            corpus = []
+            for row in rows:
+                text = f"{row['pattern']} {row['error_signature'] or ''} {row['category'] or ''}"
+                corpus.append(text)
+                self._id_map.append(row["id"])
+
+            n_components = min(self.DIM, max(1, len(corpus) - 1))
+            self._vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True)
+            tfidf_matrix = self._vectorizer.fit_transform(corpus)
+            self._svd = TruncatedSVD(n_components=n_components, random_state=42)
+            dense = self._svd.fit_transform(tfidf_matrix).astype(np.float32)
+
+            if dense.shape[1] < self.DIM:
+                padding = np.zeros((dense.shape[0], self.DIM - dense.shape[1]), dtype=np.float32)
+                dense = np.concatenate([dense, padding], axis=1)
+
+            norms = np.linalg.norm(dense, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            dense /= norms
+
+            # Remove stale index before recreating to avoid duplicate key errors
+            if os.path.exists(self.INDEX_PATH):
+                os.remove(self.INDEX_PATH)
+            index = Index(ndim=self.DIM, metric="cos", path=self.INDEX_PATH)
+            ids = np.arange(len(corpus), dtype=np.uint64)
+            index.add(ids, dense)
+            index.save()
+
+            with open(self.TFIDF_PATH, "wb") as f:
+                pickle.dump({"vectorizer": self._vectorizer, "svd": self._svd,
+                             "id_map": self._id_map}, f)
+            self._index = index
+            return True
+        except Exception:
+            return False
+
+    def _load(self) -> bool:
+        try:
+            import pickle
+            from usearch.index import Index
+            if not os.path.exists(self.TFIDF_PATH):
+                return False
+            with open(self.TFIDF_PATH, "rb") as f:
+                data = pickle.load(f)
+            self._vectorizer = data["vectorizer"]
+            self._svd = data["svd"]
+            self._id_map = data["id_map"]
+            self._index = Index(ndim=self.DIM, metric="cos", path=self.INDEX_PATH)
+            return True
+        except Exception:
+            return False
+
+    def _embed_query(self, text: str):
+        try:
+            import numpy as np
+            vec = self._vectorizer.transform([text])
+            dense = self._svd.transform(vec).astype(np.float32)
+            if dense.shape[1] < self.DIM:
+                padding = np.zeros((1, self.DIM - dense.shape[1]), dtype=np.float32)
+                dense = np.concatenate([dense, padding], axis=1)
+            norm = np.linalg.norm(dense)
+            if norm > 0:
+                dense /= norm
+            return dense[0]
+        except Exception:
+            return None
+
+    def add(self, row_id: Any, text: str) -> None:
+        """Add a single entry — triggers full rebuild for simplicity."""
+        self.rebuild_from_db()
+
+    def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Return list of {id, score} sorted by score desc."""
+        if self._vectorizer is None:
+            if not self._load():
+                if not self.rebuild_from_db():
+                    return []
+        vec = self._embed_query(query)
+        if vec is None or self._index is None:
+            return []
+        try:
+            matches = self._index.search(vec, top_k)
+            results = []
+            for pos, dist in zip(matches.keys, matches.distances):
+                pos = int(pos)
+                if pos < len(self._id_map):
+                    results.append({"id": self._id_map[pos], "score": float(1.0 - dist)})
+            return results
+        except Exception:
+            return []
+
+
+_SEMANTIC_INDEX: Optional["SemanticIndex"] = None
+
+
+def get_semantic_index() -> "SemanticIndex":
+    global _SEMANTIC_INDEX
+    if _SEMANTIC_INDEX is None:
+        _SEMANTIC_INDEX = SemanticIndex()
+    return _SEMANTIC_INDEX
 
 
 def get_conn() -> sqlite3.Connection:
@@ -352,6 +494,12 @@ def save_fix(
         )
     conn.commit()
     conn.close()
+    # Rebuild semantic index in background after each new pattern
+    try:
+        import threading
+        threading.Thread(target=get_semantic_index().rebuild_from_db, daemon=True).start()
+    except Exception:
+        pass
     return fix_id
 
 
