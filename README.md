@@ -6,6 +6,19 @@ Built for Rocket.new support engineers. Unzip a client project, get a root cause
 
 ---
 
+## What's New (May 2026)
+
+- Added remote support-session workflow commands:
+  - `rkt-ok <threadId>` starts a container session, installs Cursor rules, opens remote project + Ghostty split panes.
+  - `rkt-done` removes injected rules, runs `rocket push`, then `rocket clean` to reset.
+  - `rkt-rules-add` and `rkt-rules-remove` manage `cursor-rules-v34` files safely on the remote project.
+- Updated `rkt-deliver` workspace resolution:
+  - Uses current directory first (if valid), then falls back to active workspace metadata.
+  - Cleans rkt-specific `.gitignore` entries before packaging.
+- Refreshed engine + command stack in recent releases (triage, deliverer, probe scanner, fingerprinting, and rule packs).
+
+---
+
 ## Install
 
 ```bash
@@ -45,9 +58,10 @@ Same triage + fix menu as `rkt-crazy`, but skips Phase 2 (Cursor rule installati
 
 ```bash
 rkt-deliver
+rkt-deliver /path/to/workspace
 ```
 
-Learns from your changes, strips all tooling artifacts, and zips the fixed project to `~/Downloads/` for delivery.
+Learns from your changes, strips all tooling artifacts, and zips the fixed project for delivery. If run inside a workspace, it uses the current directory automatically.
 
 ---
 
@@ -208,9 +222,24 @@ Before zipping, `rkt-deliver` strips all tooling artifacts from the workspace:
 `.rkt_snapshot` · `node_modules` · `.next` · `.claude` · `.cursor` · `.swarm` · `.claude-flow` · `memory-bank` · `graphify-out` · `code-review-graph` · `.code-review-graph`
 
 **Files removed:**
-`CLAUDE.md` · `AGENTS.md` · `.mcp.json` · `the-rocket-guide.md` · `TROUBLESHOOTING.md` · `.rkt_meta.json` · `.rkt_prompt.md` · `ruvector.db` · `ruvector.db-shm` · `ruvector.db-wal` · `*.rkt_backup`
+`CLAUDE.md` · `AGENTS.md` · `.mcp.json` · `the-rocket-guide.md` · `TROUBLESHOOTING.md` · `.rkt_meta.json` · `.rkt_prompt.md` · `.rkt_handoff_prompt.md` · `bun.lock` · `ruvector.db` · `ruvector.db-shm` · `ruvector.db-wal` · `*.rkt_backup`
 
 The output zip lands at `~/Documents/Rocket/<project>/fixed/<project>_fixed.zip`.
+
+---
+
+## Support Container Workflow
+
+Use these when handling live support threads on the remote container (`support-vedang-patel`):
+
+```bash
+rkt-ok <threadId>      # init thread, install rules, open remote Cursor + Ghostty panes
+rkt-rules-add          # inject cursor-rules-v34 into active remote project
+rkt-rules-remove       # remove injected rules + cleanup .gitignore block
+rkt-done               # remove rules, push, clean, close serve pane
+```
+
+`rkt-done` calls `rkt-rules-remove --yes` before push to avoid shipping local support tooling files.
 
 ---
 

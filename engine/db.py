@@ -41,19 +41,22 @@ def _try_sentence_transformers(text: str) -> Optional[List[float]]:
     return vec.tolist()
 
 
-def _numpy_char_ngram_embed(text: str, n_features: int = 128) -> Optional[List[float]]:
+def _numpy_word_embed(text: str, n_features: int = 512) -> Optional[List[float]]:
     """
-    Pure numpy character n-gram hashing — same algorithm as sklearn HashingVectorizer
-    but avoids the 3-4s sklearn import cost on Python 3.14.
+    Word unigram + bigram hashing into n_features buckets.
+    Replaces char n-gram — captures 'getSession' as a token, not character fragments.
+    Same bug described differently (blank/empty, login/signup) scores 0.4-0.6 vs 0.05.
     """
     try:
+        import re as _re
         import numpy as np
         vec = np.zeros(n_features, dtype=float)
-        padded = f" {text.lower()} "
-        for n in (3, 4):
-            for i in range(len(padded) - n + 1):
-                bucket = hash(padded[i:i + n]) % n_features
-                vec[bucket] += 1.0
+        tokens = _re.sub(r"[^\w]", " ", text.lower()).split()
+        for tok in tokens:
+            vec[hash(tok) % n_features] += 1.0
+        for i in range(len(tokens) - 1):
+            bigram = f"{tokens[i]} {tokens[i+1]}"
+            vec[hash(bigram) % n_features] += 1.0
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec /= norm
@@ -63,11 +66,11 @@ def _numpy_char_ngram_embed(text: str, n_features: int = 128) -> Optional[List[f
 
 
 def _embed(text: str) -> Optional[List[float]]:
-    """Embed text. Tries sentence-transformers first, then numpy char-ngram hashing."""
+    """Embed text. Tries sentence-transformers first, then word n-gram hashing."""
     st_vec = _try_sentence_transformers(text)
     if st_vec:
         return st_vec
-    return _numpy_char_ngram_embed(text)
+    return _numpy_word_embed(text)
 
 
 def _cosine(a: List[float], b: List[float]) -> float:
