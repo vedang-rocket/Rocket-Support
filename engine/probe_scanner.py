@@ -507,6 +507,50 @@ def scan_anon_key_format(repo_path: str) -> List[Dict[str, Any]]:
     return findings
 
 
+# ── Rule 11: 'use client' + server-only import ───────────────────────────────
+
+def scan_use_client_server_import(repo_path: str) -> List[Dict[str, Any]]:
+    """'use client' files that import server-only supabase/ssr exports → rg."""
+    findings: List[Dict] = []
+    server_only_imports = [
+        "createServerClient",
+        "createRouteHandlerClient",
+    ]
+    pattern = "|".join(server_only_imports)
+    globs = ["**/page.tsx", "**/page.ts", "**/layout.tsx",
+             "**/components/**/*.tsx", "**/components/**/*.ts"]
+    glob_args: List[str] = []
+    for g in globs:
+        glob_args += ["--glob", g]
+
+    for match in _run_rg(["-n", pattern] + glob_args + [repo_path]):
+        fpath = match["path"]["text"]
+        lno   = match["line_number"]
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                first_500 = fh.read(500)
+            if "use client" not in first_500:
+                continue
+        except OSError:
+            continue
+        col = match["submatches"][0]["start"] if match.get("submatches") else 0
+        matched_text = match["lines"]["text"].strip() if match.get("lines") else ""
+        findings.append(_make_finding(
+            check_id="use-client-server-import",
+            path=fpath,
+            start_line=lno, start_col=col,
+            end_line=lno, end_col=col + 25,
+            message=(
+                f"'use client' file imports server-only function ({matched_text}). "
+                "This causes a build failure. Use createBrowserClient for client components."
+            ),
+            severity="ERROR",
+            fix="Replace with createBrowserClient from '@supabase/ssr'",
+            category="AUTH",
+        ))
+    return findings
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
@@ -528,7 +572,8 @@ def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
 
     # rg-based scanners (need repo_path)
     for fn in (scan_auth_helpers, scan_stripe_webhook, scan_supabase_wrong_import,
-               scan_env_secrets, scan_missing_dynamic_export, scan_anon_key_format):
+               scan_env_secrets, scan_missing_dynamic_export, scan_anon_key_format,
+               scan_use_client_server_import):
         try:
             findings.extend(fn(repo_path))
         except Exception as exc:
