@@ -42,6 +42,16 @@ CHECKS = [
             "should use ON DELETE CASCADE to avoid orphaned rows"
         ),
     },
+    {
+        "check":    "rls:insert_policy",
+        "needle":   "for insert",
+        "found_ok": True,
+        "fix_hint": (
+            "RLS enabled but no INSERT policy found — users cannot create rows. "
+            "Add: CREATE POLICY \"Users insert own\" ON <table> "
+            "FOR INSERT WITH CHECK (auth.uid() = user_id);"
+        ),
+    },
     # TIMESTAMPTZ check is handled separately (regex, not plain string)
 ]
 
