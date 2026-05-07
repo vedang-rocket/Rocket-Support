@@ -13,7 +13,7 @@ Entry point:
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, END
@@ -69,6 +69,11 @@ class TriageState(TypedDict):
 
     # After symptom_rank
     symptom_category:   Optional[str]
+
+    # After validate_fix (oxc gate — empty list means all valid or oxc not installed)
+    fix_plan:               Optional[Any]
+    oxc_validation_errors:  list
+    oxc_context:            str
 
     timings:            dict
     summary:            str
@@ -279,6 +284,25 @@ def node_score_and_route(state: TriageState) -> dict:
     }
 
 
+def node_validate_fix(state: TriageState) -> dict:
+    """Run oxlint on any fix proposals if oxc is available. Non-blocking."""
+    fix_plan = state.get("fix_plan")
+    if not fix_plan:
+        return {}
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fix_validator import validate_fix_plan, validation_errors_to_context
+        workspace = state.get("workspace_path", "")
+        errors = validate_fix_plan(fix_plan, workspace)
+        if errors:
+            ctx = validation_errors_to_context(errors)
+            return {"oxc_validation_errors": errors, "oxc_context": ctx}
+    except Exception:
+        pass
+    return {"oxc_validation_errors": []}
+
+
 def node_build_summary(state: TriageState) -> dict:
     fp_result   = state.get("fingerprint") or {}
     scored      = state.get("findings_scored") or []
@@ -384,6 +408,7 @@ def _build_graph() -> Any:
     g.add_node("db_lookup",        node_db_lookup)
     g.add_node("score_and_route",  node_score_and_route)
     g.add_node("symptom_rank",     node_symptom_rank)
+    g.add_node("validate_fix",     node_validate_fix)
     g.add_node("build_summary",    node_build_summary)
 
     g.set_entry_point("fingerprint")
@@ -396,7 +421,8 @@ def _build_graph() -> Any:
     g.add_edge("deduplicate",      "db_lookup")
     g.add_edge("db_lookup",        "score_and_route")
     g.add_edge("score_and_route",  "symptom_rank")
-    g.add_edge("symptom_rank",     "build_summary")
+    g.add_edge("symptom_rank",     "validate_fix")
+    g.add_edge("validate_fix",     "build_summary")
     g.add_edge("build_summary",    END)
 
     return g.compile()
