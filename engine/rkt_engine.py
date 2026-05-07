@@ -203,16 +203,9 @@ def semgrep_to_diff(findings: List[Dict], repo_path: str) -> str:
 # ── Database lookup ───────────────────────────────────────────────────────────
 
 def db_lookup(query: str, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Look up similar fixes in the database. Returns best match or None."""
+    """Look up similar fixes via hybrid search (semantic + FTS + RRF), falls back to cosine."""
     fix_db.init_db()
-    results = fix_db.find_similar(query, top_k=3, category=category)
-    if not results:
-        return None
-    best = results[0]
-    # Only return if score is meaningful
-    if best.get("_score", 0) < 0.15:
-        return None
-    return best
+    return fix_db.hybrid_lookup(query, category=category)
 
 
 # ── File-system checks (supplementing semgrep) ───────────────────────────────

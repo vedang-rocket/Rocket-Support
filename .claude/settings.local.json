@@ -56,7 +56,14 @@
       "Bash(bash -n ~/rocket-support/bin/rkt-triage)",
       "Bash(bash *)",
       "Bash(/Users/sarvadhisolution/rocket-support/bin/rkt-crazy *)",
-      "mcp__plugin_claude-mem_mcp-search__smart_outline"
+      "mcp__plugin_claude-mem_mcp-search__smart_outline",
+      "Bash(engine/.venv/bin/python *)",
+      "Bash(git -C /Users/sarvadhisolution/rocket-support add engine/rkt_engine.py engine/triage_graph.py tests/engine/test_db.py)",
+      "Bash(git -C /Users/sarvadhisolution/rocket-support commit -m ' *)",
+      "Bash(sqlite3 ~/.rocket-support/brain.db \"SELECT id, SUBSTR\\(pattern,1,60\\) FROM fixes WHERE pattern LIKE 'Manual fix:%';\")",
+      "Bash(sqlite3 ~/.rocket-support/brain.db \"SELECT id, SUBSTR\\(pattern,1,50\\), SUBSTR\\(error_signature,1,50\\) FROM fixes WHERE id IN \\('be38dc53f31131d6','9196750b369166fa'\\);\")",
+      "Bash(sqlite3 *)",
+      "Bash(engine/.venv/bin/pip install *)"
     ]
   },
   "enableAllProjectMcpServers": true,

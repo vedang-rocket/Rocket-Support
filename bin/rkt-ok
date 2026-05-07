@@ -27,7 +27,7 @@ TERM=xterm-256color ssh "$SSH_HOST" "echo 'y' | rocket clean 2>&1" || true
 
 # ── Step 2: Run rocket init ───────────────────────────────────
 info "Running rocket init..."
-INIT_OUTPUT=$(TERM=xterm-256color ssh "$SSH_HOST" "rocket init $THREAD_ID 2>&1")
+INIT_OUTPUT=$(TERM=xterm-256color ssh "$SSH_HOST" "printf '1\ny\n' | rocket init $THREAD_ID 2>&1")
 echo "$INIT_OUTPUT"
 
 if ! echo "$INIT_OUTPUT" | grep -q '"code":"OK"'; then
