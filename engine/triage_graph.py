@@ -220,7 +220,7 @@ def node_db_lookup(state: TriageState) -> dict:
     t0 = time.perf_counter()
     fp_result  = state.get("fingerprint") or {}
     category   = fp_result.get("category")
-    query = f"{state['issue_description']} {fp_result.get('common_failure', '')} {fp_result.get('project_type', '')}"
+    query = state["issue_description"].strip() or fp_result.get("common_failure", "")
     match = rkt_engine.db_lookup(query.strip(), category=category)
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})

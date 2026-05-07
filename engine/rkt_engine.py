@@ -742,10 +742,11 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
     t3 = time.perf_counter()
     fix_db.init_db()
 
-    query_terms = f"{hint} {ptype} {fingerprint_result['common_failure']}"
-    if hint:
-        query_terms = f"{hint} {query_terms}"
-
+    # Use hint if given; otherwise fall back to common_failure only (no project type bias)
+    if hint and hint.strip():
+        query_terms = hint.strip()
+    else:
+        query_terms = fingerprint_result.get("common_failure", "")
     db_match = db_lookup(query_terms, category=fingerprint_result.get("category"))
     result["db_match"] = db_match
 
