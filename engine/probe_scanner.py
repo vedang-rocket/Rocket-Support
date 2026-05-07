@@ -551,6 +551,53 @@ def scan_use_client_server_import(repo_path: str) -> List[Dict[str, Any]]:
     return findings
 
 
+# ── Rule 12: Server Action missing revalidatePath ─────────────────────────────
+
+def scan_missing_revalidate(ts_files: List[str]) -> List[Dict[str, Any]]:
+    """'use server' files with .update()/.insert()/.delete() but no revalidatePath."""
+    findings: List[Dict] = []
+    import re as _re
+    mutation_pattern = r"\.(?:update|insert|delete|upsert)\s*\("
+
+    for fpath in ts_files:
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                first_300 = fh.read(300)
+            if "use server" not in first_300:
+                continue
+        except OSError:
+            continue
+
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+
+        has_mutation  = bool(_re.search(mutation_pattern, content))
+        has_revalidate = "revalidatePath" in content or "revalidateTag" in content
+        if has_mutation and not has_revalidate:
+            lno = next(
+                (i + 1 for i, line in enumerate(content.splitlines())
+                 if _re.search(mutation_pattern, line)),
+                1,
+            )
+            findings.append(_make_finding(
+                check_id="server-action-missing-revalidate",
+                path=fpath,
+                start_line=lno, start_col=0,
+                end_line=lno, end_col=0,
+                message=(
+                    "Server Action mutates data but has no revalidatePath() or revalidateTag(). "
+                    "Next.js will serve stale cached data after the mutation."
+                ),
+                severity="WARNING",
+                fix="import { revalidatePath } from 'next/cache'; revalidatePath('/your-path')",
+                category="BUILD",
+            ))
+    return findings
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
@@ -564,7 +611,8 @@ def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
     errors:   List[str]  = []
 
     # AST-based scanners (need ts_files list)
-    for fn in (scan_getsession, scan_cookies_without_await, scan_headers_without_await):
+    for fn in (scan_getsession, scan_cookies_without_await, scan_headers_without_await,
+               scan_missing_revalidate):
         try:
             findings.extend(fn(ts_files))
         except Exception as exc:
@@ -573,7 +621,7 @@ def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
     # rg-based scanners (need repo_path)
     for fn in (scan_auth_helpers, scan_stripe_webhook, scan_supabase_wrong_import,
                scan_env_secrets, scan_missing_dynamic_export, scan_anon_key_format,
-               scan_use_client_server_import):
+               scan_use_client_server_import, scan_missing_revalidate):
         try:
             findings.extend(fn(repo_path))
         except Exception as exc:
