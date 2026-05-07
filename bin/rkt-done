@@ -92,5 +92,13 @@ echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━�
 echo -e "${BOLD}  Done! $ACTIVE_PROJECT pushed and cleaned.${NC}"
 echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
+
+# ── Auto-learn: save fix pattern to brain.db ─────────────────────────────────
+LEARN_SCRIPT="$(dirname "$0")/../engine/learn_fix.py"
+VENV_PYTHON="$(dirname "$0")/../engine/.venv/bin/python"
+if [[ -f "$LEARN_SCRIPT" && -f "$VENV_PYTHON" ]]; then
+  "$VENV_PYTHON" "$LEARN_SCRIPT" --project "$ACTIVE_PROJECT"
+fi
+
 echo -e "  Start next ticket:  ${CYAN}rkt-ok <threadId>${NC}"
 echo ""
