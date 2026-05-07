@@ -174,10 +174,22 @@ def build_chains(layout: Dict[str, str]) -> Dict[str, List[Tuple]]:
             "Add SUPABASE_SERVICE_ROLE_KEY=<value> from Supabase Dashboard → Settings → API",
         ),
         (
+            ".env.production",
+            ["SUPABASE_SERVICE_ROLE_KEY"],
+            "SUPABASE_SERVICE_ROLE_KEY missing from .env.production — will fail on deploy",
+            "Add SUPABASE_SERVICE_ROLE_KEY=<value> to .env.production for deployed environment",
+        ),
+        (
             ".env.local",
             ["STRIPE_WEBHOOK_SECRET"],
             "STRIPE_WEBHOOK_SECRET missing from .env.local — webhook verification will fail",
             "Add STRIPE_WEBHOOK_SECRET=whsec_... from Stripe Dashboard → Webhooks → Signing secret",
+        ),
+        (
+            ".env.production",
+            ["STRIPE_WEBHOOK_SECRET"],
+            "STRIPE_WEBHOOK_SECRET missing from .env.production — webhook will fail on deploy",
+            "Add STRIPE_WEBHOOK_SECRET=whsec_... to .env.production",
         ),
     ]
 
