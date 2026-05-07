@@ -339,6 +339,70 @@ def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
     return findings
 
 
+# ── Rule 9: headers() without await ──────────────────────────────────────────
+
+def scan_headers_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
+    """const/let $H = headers() without await → ast-grep-py; rg fallback."""
+    findings: List[Dict] = []
+
+    if _AST_GREP_AVAILABLE:
+        patterns = [
+            ("const $H = headers()", "headers-without-await-const"),
+            ("let $H = headers()",   "headers-without-await-let"),
+        ]
+        for fpath in ts_files:
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as fh:
+                    source = fh.read()
+                root = SgRoot(source, "typescript")
+                for pat, cid in patterns:
+                    for m in root.root().find_all(pattern=pat):
+                        text = m.text()
+                        if "await" in text:
+                            continue
+                        r = m.range()
+                        line = r.start.line + 1
+                        col  = r.start.column
+                        fixed = text.replace("= headers()", "= await headers()")
+                        findings.append(_make_finding(
+                            check_id="headers-without-await",
+                            path=fpath,
+                            start_line=line, start_col=col,
+                            end_line=r.end.line + 1, end_col=r.end.column,
+                            message=(
+                                "headers() must be awaited in Next.js 15. Without await you get "
+                                "a Promise, not the headers object — silent failure. (ROCKET RULE 5)"
+                            ),
+                            severity="ERROR",
+                            fix=fixed,
+                            category="AUTH",
+                        ))
+            except Exception:
+                pass
+        return findings
+
+    # rg fallback
+    pattern = r"(?:const|let)\s+\w+\s*=\s*headers\(\)"
+    for match in _run_rg(["-n", pattern] + ts_files):
+        fpath = match["path"]["text"]
+        lno   = match["line_number"]
+        col   = match["submatches"][0]["start"] if match.get("submatches") else 0
+        text  = match["lines"]["text"] if match.get("lines") else ""
+        if "await" in text:
+            continue
+        findings.append(_make_finding(
+            check_id="headers-without-await",
+            path=fpath,
+            start_line=lno, start_col=col,
+            end_line=lno, end_col=col + 20,
+            message="headers() must be awaited in Next.js 15. (ROCKET RULE 5)",
+            severity="ERROR",
+            fix=text.replace("= headers()", "= await headers()").strip(),
+            category="AUTH",
+        ))
+    return findings
+
+
 # ── Rule 7: NEXT_PUBLIC_ on secret keys ──────────────────────────────────────
 
 def scan_env_secrets(repo_path: str) -> List[Dict[str, Any]]:
@@ -456,7 +520,7 @@ def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
     errors:   List[str]  = []
 
     # AST-based scanners (need ts_files list)
-    for fn in (scan_getsession, scan_cookies_without_await):
+    for fn in (scan_getsession, scan_cookies_without_await, scan_headers_without_await):
         try:
             findings.extend(fn(ts_files))
         except Exception as exc:
