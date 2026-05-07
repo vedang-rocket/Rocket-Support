@@ -7,6 +7,7 @@ Schema: fixes(id, pattern, error_signature, category, fix_diff, verified, uses, 
 import sqlite3
 import json
 import os
+import sys
 import hashlib
 import datetime
 from typing import Optional, List, Dict, Any
@@ -547,6 +548,95 @@ def find_similar(query: str, top_k: int = 3, category: Optional[str] = None) -> 
 
     results.sort(key=lambda x: x["_score"], reverse=True)
     return results[:top_k]
+
+
+def _rrf_merge(
+    semantic_results: List[Dict[str, Any]],
+    fts_results: List[Dict[str, Any]],
+    k: int = 60,
+) -> List[str]:
+    """
+    Reciprocal Rank Fusion: merge semantic (id=brain.db hex id) and FTS
+    (id=integer row position) result lists into a ranked list of brain.db IDs.
+    Returns up to 3 brain.db IDs.
+    """
+    init_db()
+    conn = get_conn()
+    all_rows = conn.execute("SELECT id FROM fixes").fetchall()
+    conn.close()
+    id_list = [r["id"] for r in all_rows]
+
+    scores: Dict[str, float] = {}
+
+    for rank, item in enumerate(semantic_results):
+        # Semantic: id is the position in id_list
+        pos = item["id"]
+        if isinstance(pos, int) and 0 <= pos < len(id_list):
+            db_id = id_list[pos]
+        else:
+            db_id = pos  # already a hex id
+        scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (k + rank + 1)
+
+    for rank, item in enumerate(fts_results):
+        # FTS: id is also an integer position
+        pos = item["id"]
+        if isinstance(pos, int) and 0 <= pos < len(id_list):
+            db_id = id_list[pos]
+        else:
+            db_id = str(pos)
+        scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (k + rank + 1)
+
+    return sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:3]
+
+
+def hybrid_lookup(query: str, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Hybrid search: run SemanticIndex + BrainFTS in parallel, merge with RRF.
+    Falls back to find_similar() if either search system fails.
+    Returns the top-1 fix dict or None.
+    """
+    if not query or not query.strip():
+        return None
+
+    semantic_results: List[Dict[str, Any]] = []
+    fts_results: List[Dict[str, Any]] = []
+
+    try:
+        semantic_results = get_semantic_index().search(query, top_k=5)
+    except Exception:
+        pass
+
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from brain_fts import get_brain_fts
+        fts = get_brain_fts()
+        if fts._index is None:
+            fts.rebuild_from_db()
+        fts_results = fts.search(query, top_k=5)
+    except Exception:
+        pass
+
+    if not semantic_results and not fts_results:
+        # Both failed — fall back to word n-gram cosine
+        results = find_similar(query, top_k=1, category=category)
+        return results[0] if results and results[0].get("_score", 0) >= 0.15 else None
+
+    merged_ids = _rrf_merge(semantic_results, fts_results)
+
+    init_db()
+    conn = get_conn()
+    for db_id in merged_ids:
+        row = conn.execute("SELECT * FROM fixes WHERE id = ?", (db_id,)).fetchone()
+        if row is None:
+            continue
+        row_dict = dict(row)
+        if category and row_dict.get("category") and row_dict["category"] != category:
+            continue
+        conn.close()
+        row_dict["_score"] = 0.75  # hybrid match — above find_similar threshold
+        return row_dict
+    conn.close()
+    return None
 
 
 def get_all_fixes() -> List[Dict[str, Any]]:

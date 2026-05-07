@@ -41,6 +41,21 @@ def test_semantic_index_build_and_search():
     assert len(stripe_query) > 0
 
 
+def test_hybrid_lookup_auth_query():
+    """Auth query should return AUTH pattern, not STRIPE."""
+    result = db.hybrid_lookup("dashboard blank after login getSession")
+    assert result is not None
+    assert result.get("category") == "AUTH"
+    assert result.get("_score", 0) > 0.0
+
+
+def test_hybrid_lookup_stripe_query():
+    """STRIPE query should return STRIPE pattern."""
+    result = db.hybrid_lookup("stripe webhook 400 request json body")
+    assert result is not None
+    assert result.get("category") == "STRIPE"
+
+
 def test_db_lookup_no_stripe_bias():
     """Auth hint should not return STRIPE patterns."""
     import rkt_engine
