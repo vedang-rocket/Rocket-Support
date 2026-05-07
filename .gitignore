@@ -37,3 +37,4 @@ kb/kb_index.pkl
 # Logs
 logs/
 *.log
+.claude/worktrees/
