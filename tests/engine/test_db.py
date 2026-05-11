@@ -64,3 +64,47 @@ def test_db_lookup_no_stripe_bias():
         assert result.get("category") != "STRIPE", (
             f"Got STRIPE match for AUTH hint: {result.get('pattern')}"
         )
+
+
+def test_rrf_merge_returns_tuple():
+    from db import _rrf_merge
+    ids, scores = _rrf_merge(
+        [{"id": "aaa"}],
+        [{"id": "aaa"}, {"id": "bbb"}],
+    )
+    assert isinstance(ids, list)
+    assert isinstance(scores, dict)
+    assert "aaa" in scores
+    assert scores["aaa"] > scores.get("bbb", 0.0)
+
+
+def test_rrf_merge_score_above_threshold():
+    from db import _rrf_merge
+    ids, scores = _rrf_merge([{"id": "x"}], [{"id": "x"}])
+    assert scores["x"] > 0.012  # dual hit at rank 0 must clear threshold
+
+
+def test_rrf_merge_empty_inputs():
+    from db import _rrf_merge
+    ids, scores = _rrf_merge([], [])
+    assert ids == []
+    assert scores == {}
+
+
+def test_rrf_merge_preserves_rank_order():
+    from db import _rrf_merge
+    ids, scores = _rrf_merge(
+        [{"id": "top"}, {"id": "mid"}, {"id": "bottom"}],
+        [],
+    )
+    assert ids[0] == "top"
+    assert scores["top"] > scores["bottom"]
+
+
+def test_hybrid_lookup_real_score():
+    """hybrid_lookup must return actual RRF score, not hardcoded 0.75 sentinel."""
+    result = db.hybrid_lookup("middleware missing updateSession", category="AUTH")
+    if result is not None:
+        score = result.get("_score", 0)
+        assert score != 0.75, "Score must not be the old 0.75 sentinel"
+        assert 0.012 <= score <= 0.74, f"Score out of expected range: {score}"

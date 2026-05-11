@@ -10,9 +10,27 @@ import os
 import sys
 import hashlib
 import datetime
+import subprocess
 from typing import Optional, List, Dict, Any
 
+import tracer as _tracer
+
 DB_PATH = os.path.expanduser("~/.rocket-support/brain.db")
+
+
+def _semantic_store_dir() -> str:
+    preferred = os.path.expanduser("~/.rocket-support")
+    try:
+        os.makedirs(preferred, exist_ok=True)
+        probe = os.path.join(preferred, ".idx_write_probe")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        return preferred
+    except Exception:
+        fallback = "/tmp/rocket-support"
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
 
 # Embedding strategy (in priority order):
 #   1. sentence-transformers (best, requires torch — optional)
@@ -94,71 +112,80 @@ def _cosine(a: List[float], b: List[float]) -> float:
 
 class SemanticIndex:
     """
-    Semantic index using usearch ANN + sklearn TF-IDF LSA.
-    Stored at ~/.rocket-support/brain.usearch + brain.tfidf.pkl
-    Falls back gracefully if usearch/sklearn not available.
+    Semantic index using usearch ANN + _numpy_word_embed (no sklearn).
+    Stored at ~/.rocket-support/brain.usearch + brain.idmap.pkl
+    Falls back gracefully if usearch not available.
     """
-    INDEX_PATH = os.path.expanduser("~/.rocket-support/brain.usearch")
-    TFIDF_PATH = os.path.expanduser("~/.rocket-support/brain.tfidf.pkl")
-    DIM = 64  # LSA components — sufficient for ~30-200 docs
+    _STORE_DIR = _semantic_store_dir()
+    INDEX_PATH = os.path.join(_STORE_DIR, "brain.usearch")
+    ID_MAP_PATH = os.path.join(_STORE_DIR, "brain.idmap.pkl")
+    DIM = 512  # matches _numpy_word_embed n_features
 
     def __init__(self):
         self._index = None
-        self._vectorizer = None
-        self._svd = None
         self._id_map: List[Any] = []
+        self._fallback_vectors = None
 
     def rebuild_from_db(self) -> bool:
-        """Fit TF-IDF + SVD on all brain.db entries, build usearch index."""
+        """Build usearch index from brain.db using numpy word embeddings (no sklearn)."""
         try:
             import numpy as np
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.decomposition import TruncatedSVD
-            from usearch.index import Index
             import pickle
 
             init_db()
             conn = get_conn()
-            rows = conn.execute(
-                "SELECT id, pattern, error_signature, category FROM fixes"
-            ).fetchall()
+            rows = _tracer.trace_db(
+                conn,
+                "SELECT id, pattern, error_signature, category FROM fixes",
+            )
             conn.close()
 
             if not rows:
-                return False
+                # Ensure the index can be built in fresh environments.
+                seed_builtin_fixes()
+                conn = get_conn()
+                rows = _tracer.trace_db(
+                    conn,
+                    "SELECT id, pattern, error_signature, category FROM fixes",
+                )
+                conn.close()
+                if not rows:
+                    return False
 
             self._id_map = []
-            corpus = []
+            vectors = []
             for row in rows:
                 text = f"{row['pattern']} {row['error_signature'] or ''} {row['category'] or ''}"
-                corpus.append(text)
-                self._id_map.append(row["id"])
+                vec = _numpy_word_embed(text, n_features=self.DIM)
+                if vec:
+                    vectors.append(np.array(vec, dtype=np.float32))
+                    self._id_map.append(row["id"])
 
-            n_components = min(self.DIM, max(1, len(corpus) - 1))
-            self._vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True)
-            tfidf_matrix = self._vectorizer.fit_transform(corpus)
-            self._svd = TruncatedSVD(n_components=n_components, random_state=42)
-            dense = self._svd.fit_transform(tfidf_matrix).astype(np.float32)
+            if not vectors:
+                return False
 
-            if dense.shape[1] < self.DIM:
-                padding = np.zeros((dense.shape[0], self.DIM - dense.shape[1]), dtype=np.float32)
-                dense = np.concatenate([dense, padding], axis=1)
-
+            dense = np.array(vectors, dtype=np.float32)
             norms = np.linalg.norm(dense, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             dense /= norms
+            self._fallback_vectors = dense
 
-            # Remove stale index before recreating to avoid duplicate key errors
+            try:
+                from usearch.index import Index
+            except Exception:
+                # Keep fallback vectors in memory when usearch isn't available.
+                self._index = None
+                return True
+
             if os.path.exists(self.INDEX_PATH):
                 os.remove(self.INDEX_PATH)
-            index = Index(ndim=self.DIM, metric="cos", path=self.INDEX_PATH)
-            ids = np.arange(len(corpus), dtype=np.uint64)
+            index = Index(ndim=self.DIM, metric="cos")
+            ids = np.arange(len(vectors), dtype=np.uint64)
             index.add(ids, dense)
-            index.save()
+            index.save(self.INDEX_PATH)
 
-            with open(self.TFIDF_PATH, "wb") as f:
-                pickle.dump({"vectorizer": self._vectorizer, "svd": self._svd,
-                             "id_map": self._id_map}, f)
+            with open(self.ID_MAP_PATH, "wb") as f:
+                pickle.dump(self._id_map, f)
             self._index = index
             return True
         except Exception:
@@ -168,32 +195,29 @@ class SemanticIndex:
         try:
             import pickle
             from usearch.index import Index
-            if not os.path.exists(self.TFIDF_PATH):
+            if not os.path.exists(self.ID_MAP_PATH):
                 return False
-            with open(self.TFIDF_PATH, "rb") as f:
-                data = pickle.load(f)
-            self._vectorizer = data["vectorizer"]
-            self._svd = data["svd"]
-            self._id_map = data["id_map"]
-            self._index = Index(ndim=self.DIM, metric="cos", path=self.INDEX_PATH)
+            with open(self.ID_MAP_PATH, "rb") as f:
+                self._id_map = pickle.load(f)
+            # ndim mismatch (old 64-dim index) will raise — caught and triggers rebuild
+            if not os.path.exists(self.INDEX_PATH):
+                return False
+            self._index = Index(ndim=self.DIM, metric="cos")
+            self._index.load(self.INDEX_PATH)
             return True
         except Exception:
             return False
 
     def _embed_query(self, text: str):
-        try:
-            import numpy as np
-            vec = self._vectorizer.transform([text])
-            dense = self._svd.transform(vec).astype(np.float32)
-            if dense.shape[1] < self.DIM:
-                padding = np.zeros((1, self.DIM - dense.shape[1]), dtype=np.float32)
-                dense = np.concatenate([dense, padding], axis=1)
-            norm = np.linalg.norm(dense)
-            if norm > 0:
-                dense /= norm
-            return dense[0]
-        except Exception:
+        import numpy as np
+        vec = _numpy_word_embed(text, n_features=self.DIM)
+        if vec is None:
             return None
+        arr = np.array(vec, dtype=np.float32)
+        norm = np.linalg.norm(arr)
+        if norm > 0:
+            arr /= norm
+        return arr
 
     def add(self, row_id: Any, text: str) -> None:
         """Add a single entry — triggers full rebuild for simplicity."""
@@ -201,12 +225,26 @@ class SemanticIndex:
 
     def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """Return list of {id, score} sorted by score desc."""
-        if self._vectorizer is None:
+        if self._index is None:
             if not self._load():
                 if not self.rebuild_from_db():
                     return []
         vec = self._embed_query(query)
-        if vec is None or self._index is None:
+        if vec is None:
+            return []
+        if self._index is None and self._fallback_vectors is not None:
+            try:
+                import numpy as np
+                sims = self._fallback_vectors @ vec
+                order = np.argsort(-sims)[:max(1, top_k)]
+                return [
+                    {"id": self._id_map[int(i)], "score": float(sims[int(i)])}
+                    for i in order
+                    if int(i) < len(self._id_map)
+                ]
+            except Exception:
+                return []
+        if self._index is None:
             return []
         try:
             matches = self._index.search(vec, top_k)
@@ -501,6 +539,19 @@ def save_fix(
         threading.Thread(target=get_semantic_index().rebuild_from_db, daemon=True).start()
     except Exception:
         pass
+    # When a fix is verified, rebuild both semantic + FTS indexes in background.
+    if verified == 1:
+        try:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            rebuild_script = os.path.join(repo_root, "engine", "rebuild_indexes.sh")
+            subprocess.Popen(
+                [rebuild_script],
+                cwd=repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
     return fix_id
 
 
@@ -513,12 +564,13 @@ def find_similar(query: str, top_k: int = 3, category: Optional[str] = None) -> 
     conn = get_conn()
 
     if category:
-        rows = conn.execute(
+        rows = _tracer.trace_db(
+            conn,
             "SELECT * FROM fixes WHERE category = ? ORDER BY uses DESC",
             (category,),
-        ).fetchall()
+        )
     else:
-        rows = conn.execute("SELECT * FROM fixes ORDER BY uses DESC").fetchall()
+        rows = _tracer.trace_db(conn, "SELECT * FROM fixes ORDER BY uses DESC")
 
     conn.close()
 
@@ -554,39 +606,26 @@ def _rrf_merge(
     semantic_results: List[Dict[str, Any]],
     fts_results: List[Dict[str, Any]],
     k: int = 60,
-) -> List[str]:
+) -> tuple:
     """
-    Reciprocal Rank Fusion: merge semantic (id=brain.db hex id) and FTS
-    (id=integer row position) result lists into a ranked list of brain.db IDs.
-    Returns up to 3 brain.db IDs.
+    Reciprocal Rank Fusion: merge semantic and FTS result lists.
+    Both return hex fix IDs directly.
+    Returns (sorted_ids[:3], scores_dict) so callers can threshold on real score.
     """
-    init_db()
-    conn = get_conn()
-    all_rows = conn.execute("SELECT id FROM fixes").fetchall()
-    conn.close()
-    id_list = [r["id"] for r in all_rows]
-
     scores: Dict[str, float] = {}
 
     for rank, item in enumerate(semantic_results):
-        # Semantic: id is the position in id_list
-        pos = item["id"]
-        if isinstance(pos, int) and 0 <= pos < len(id_list):
-            db_id = id_list[pos]
-        else:
-            db_id = pos  # already a hex id
+        # Semantic: id is the hex fix_id string from SemanticIndex._id_map
+        db_id = str(item["id"])
         scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (k + rank + 1)
 
     for rank, item in enumerate(fts_results):
-        # FTS: id is also an integer position
-        pos = item["id"]
-        if isinstance(pos, int) and 0 <= pos < len(id_list):
-            db_id = id_list[pos]
-        else:
-            db_id = str(pos)
+        # FTS: id is now the hex fix_id string directly
+        db_id = str(item["id"])
         scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (k + rank + 1)
 
-    return sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:3]
+    sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:3]
+    return sorted_ids, scores
 
 
 def hybrid_lookup(query: str, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -611,7 +650,9 @@ def hybrid_lookup(query: str, category: Optional[str] = None) -> Optional[Dict[s
         from brain_fts import get_brain_fts
         fts = get_brain_fts()
         if fts._index is None:
-            fts.rebuild_from_db()
+            fts._open_or_create()  # load from persisted index dir first
+        if fts._index is None:
+            fts.rebuild_from_db()  # only rebuild if dir doesn't exist yet
         fts_results = fts.search(query, top_k=5)
     except Exception:
         pass
@@ -621,19 +662,24 @@ def hybrid_lookup(query: str, category: Optional[str] = None) -> Optional[Dict[s
         results = find_similar(query, top_k=1, category=category)
         return results[0] if results and results[0].get("_score", 0) >= 0.15 else None
 
-    merged_ids = _rrf_merge(semantic_results, fts_results)
+    merged_ids, rrf_scores = _rrf_merge(semantic_results, fts_results)
 
     init_db()
     conn = get_conn()
     for db_id in merged_ids:
-        row = conn.execute("SELECT * FROM fixes WHERE id = ?", (db_id,)).fetchone()
+        rows = _tracer.trace_db(conn, "SELECT * FROM fixes WHERE id = ?", (db_id,))
+        row = rows[0] if rows else None
         if row is None:
             continue
         row_dict = dict(row)
         if category and row_dict.get("category") and row_dict["category"] != category:
             continue
+        best_score = rrf_scores.get(db_id, 0.0)
+        if best_score < 0.012:  # below minimum RRF threshold — no confident match
+            conn.close()
+            return None
         conn.close()
-        row_dict["_score"] = 0.75  # hybrid match — above find_similar threshold
+        row_dict["_score"] = min(best_score, 0.74)
         return row_dict
     conn.close()
     return None

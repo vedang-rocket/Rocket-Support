@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE_DIR)
 
+import tracer as _tracer
 from finding_resolver import resolve
 
 
@@ -261,6 +262,57 @@ class ClaudeAgent:
         except Exception:
             return ""
 
+    def _get_surgical_context(
+        self,
+        file_path: str,
+        line_num: int,
+        repo_path: str,
+    ) -> str:
+        """
+        Try slicer first (tree-sitter function extraction).
+        Fall back to 7-line window if slicer fails or finds nothing.
+        Never raises — always returns a string.
+        """
+        try:
+            import slicer as _slicer
+            import os
+
+            rel_path = os.path.relpath(file_path, repo_path)
+
+            slices = _slicer.slice_file(file_path)
+
+            if slices:
+                best = None
+                for s in slices:
+                    start = s.get("start_line", 0)
+                    end = s.get("end_line", 0)
+                    if start <= line_num <= end:
+                        best = s
+                        break
+
+                if best is None and slices:
+                    best = min(
+                        slices,
+                        key=lambda s: abs(s.get("start_line", 0) - line_num)
+                    )
+
+                if best:
+                    source = best.get("source", "")
+                    func_name = best.get("function_name", "")
+                    start_line = best.get("start_line", line_num)
+
+                    numbered = []
+                    for i, line in enumerate(source.splitlines(), start=start_line):
+                        marker = ">>>" if i == line_num else "   "
+                        numbered.append(f"{marker} {i:4d}: {line}")
+
+                    header = f"# Function: {func_name} ({rel_path})"
+                    return header + "\n" + "\n".join(numbered)
+        except Exception:
+            pass
+
+        return self._extract_minimal_context(file_path, line_num)
+
     @staticmethod
     def _verify_change_safe(file_path: str, change: dict) -> bool:
         """Return True only if old content exists exactly as specified."""
@@ -312,7 +364,11 @@ class ClaudeAgent:
         primary_file_relative = os.path.relpath(primary["file_path"], repo_path)
         primary_line_number = primary["line_number"] or 1
         primary_finding_message = primary["message"] or primary["rule_id"] or "unspecified issue"
-        minimal_context = self._extract_minimal_context(primary["file_path"], primary_line_number)
+        minimal_context = self._get_surgical_context(
+            primary["file_path"],
+            primary_line_number,
+            repo_path,
+        )
 
         db_section = ""
         if db_match:
@@ -332,7 +388,7 @@ ISSUE: {primary_finding_message}
 FILE: {primary_file_relative}
 LINE: {primary_line_number}
 
-CONTEXT (7 lines around the broken line, >>> marks the problem):
+CONTEXT (function containing the broken line, >>> marks the problem):
 {minimal_context}
 
 KNOWN PATTERN FROM DATABASE:
@@ -352,6 +408,7 @@ RULES — READ CAREFULLY:
 6. Do NOT reformat, rename, or restructure anything.
 7. Do NOT add comments.
 8. Do NOT change indentation of surrounding lines.
+9. The >>> prefix in the context above is a visual marker only. Do NOT include >>> in the "old" field. Copy the exact line content without any prefix.
 
 JSON FORMAT:
 {{
@@ -373,7 +430,8 @@ If you are not certain of the exact fix → return:
         try:
             import anthropic
             client = anthropic.Anthropic()
-            response = client.messages.create(
+            response = _tracer.trace_claude(
+                client,
                 model="claude-sonnet-4-5",
                 max_tokens=1000,
                 system="You are a surgical code fixer. Return only valid JSON. Never explain. Never use markdown.",
@@ -389,8 +447,17 @@ If you are not certain of the exact fix → return:
                 return AgentResult(success=False, error="ANTHROPIC_API_KEY not set", path_used="claude_api")
             return AgentResult(success=False, error=f"API error: {err[:80]}", path_used="claude_api")
 
-        # Strip accidental markdown fences
-        raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
+        # Step 1: try to extract ```json ... ``` block first
+        import re as _re
+        _fence_match = _re.search(r'```json\s*(.*?)\s*```', raw, _re.DOTALL)
+        if _fence_match:
+            raw = _fence_match.group(1).strip()
+        else:
+            # Step 2: strip any fence markers and find first { ... } block
+            raw = _re.sub(r'```json\s*|```\s*', '', raw).strip()
+            _json_match = _re.search(r'(\{[\s\S]*\})', raw)
+            if _json_match:
+                raw = _json_match.group(1).strip()
 
         try:
             result_data = json.loads(raw)

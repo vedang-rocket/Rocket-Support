@@ -1,10 +1,10 @@
 """
-triage_graph.py — LangGraph StateGraph orchestrator for rkt triage pipeline.
+triage_graph.py — Linear triage pipeline for rkt.
 
-Pipeline (linear, all nodes always run):
+Pipeline (all nodes always run in order):
   fingerprint → chain_walker → schema → semgrep → fs_checks
               → context_filter → deduplicate → db_lookup
-              → score_and_route → symptom_rank → build_summary → END
+              → score_and_route → symptom_rank → validate_fix → build_summary
 
 Entry point:
   run_triage(workspace_path, issue_description, port) -> final state dict
@@ -13,10 +13,9 @@ Entry point:
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 from typing_extensions import TypedDict
-from langgraph.graph import StateGraph, END
 
 # ── Engine imports (call existing functions, never rewrite) ───────────────────
 
@@ -28,6 +27,7 @@ import chain_walker
 import schema_checker
 import rkt_engine
 import db as fix_db
+import tracer as _tracer
 from context_filter import filter_findings
 from dedup import deduplicate
 from symptom_ranker import rank_findings
@@ -101,6 +101,8 @@ def _score_semgrep_finding(f: Dict[str, Any]) -> tuple:
     """Return (fix_mode, confidence) for a semgrep finding."""
     rule_id = (f.get("check_id") or "").lower()
 
+    if rule_id == "probe-scanner-failed":
+        return ("MANUAL", 0.20)
     if any(kw in rule_id for kw in ("webhook", "cookies", "auth-helpers")):
         return ("AUTO", 0.97)
     if "missing-dynamic" in rule_id or "dynamic" in rule_id:
@@ -108,6 +110,16 @@ def _score_semgrep_finding(f: Dict[str, Any]) -> tuple:
     if "getsession" in rule_id or "get-session" in rule_id:
         return ("AUTO", 0.97)
     return ("GUIDED", 0.75)
+
+
+def _score_schema_finding(f: Dict[str, Any]) -> tuple:
+    """Return (fix_mode, confidence) for a schema_checker finding."""
+    check = (f.get("check") or "").lower()
+    if "rls" in check:
+        return ("GUIDED", 0.88)
+    if "trigger" in check or "on_auth" in check:
+        return ("GUIDED", 0.90)
+    return ("GUIDED", 0.72)
 
 
 def _overall_fix_mode(avg_conf: float, auto_count: int) -> str:
@@ -124,7 +136,12 @@ def _overall_fix_mode(avg_conf: float, auto_count: int) -> str:
 
 def node_fingerprint(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    result = fp.fingerprint(state["workspace_path"])
+    with _tracer.trace("PHASE2", "fingerprint") as trace_token:
+        result = fp.fingerprint(state["workspace_path"])
+        trace_token.set_result(
+            result,
+            f"type={result.get('project_type', 'Unknown')} confidence={result.get('confidence', 0):.2f}",
+        )
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["fingerprint_ms"] = round(elapsed, 1)
@@ -133,7 +150,12 @@ def node_fingerprint(state: TriageState) -> dict:
 
 def node_chain_walker(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    findings = chain_walker.walk(state["workspace_path"])
+    with _tracer.trace("PHASE2", "chain_walker") as trace_token:
+        findings = chain_walker.walk(state["workspace_path"])
+        trace_token.set_result(findings, f"findings={len(findings)}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("chain_walker findings", len(findings))
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["chain_walker_ms"] = round(elapsed, 1)
@@ -142,7 +164,13 @@ def node_chain_walker(state: TriageState) -> dict:
 
 def node_schema(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    findings = schema_checker.check(state["workspace_path"])
+    with _tracer.trace("PHASE2", "schema_checker") as trace_token:
+        findings = schema_checker.check(state["workspace_path"])
+        fail_count = len(schema_checker.failures(findings)) if findings else 0
+        trace_token.set_result(findings, f"findings={fail_count}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("schema_checker findings", fail_count)
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["schema_ms"] = round(elapsed, 1)
@@ -151,20 +179,50 @@ def node_schema(state: TriageState) -> dict:
 
 def node_semgrep(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    if _PROBE_AVAILABLE:
-        result = _probe_scanner.run_probe_scanner(state["workspace_path"])
-    else:
-        result = rkt_engine.run_semgrep(state["workspace_path"], autofix=False)
+    tool_name = "probe_scanner" if _PROBE_AVAILABLE else "semgrep"
+    with _tracer.trace("PHASE2", tool_name) as trace_token:
+        if _PROBE_AVAILABLE:
+            result = _probe_scanner.run_probe_scanner(state["workspace_path"])
+        else:
+            result = rkt_engine.run_semgrep(state["workspace_path"], autofix=False)
+        trace_findings = list(result.get("findings") or [])
+        trace_token.set_result(trace_findings, f"findings={len(trace_findings)}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("probe_scanner findings", len(trace_findings))
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["semgrep_ms"] = round(elapsed, 1)
-    findings = result.get("findings", [])
+    findings = list(result.get("findings") or [])
+    errors = result.get("errors", []) or []
+    available = result.get("available", True)
+
+    if (available is False) or (not findings and errors):
+        scanner_name = "probe" if _PROBE_AVAILABLE else "semgrep"
+        errors_text = "; ".join(str(e) for e in errors) if errors else "scanner unavailable"
+        findings.append(
+            {
+                "source": "probe",
+                "check_id": "probe-scanner-failed",
+                "path": state["workspace_path"],
+                "start": {"line": 1, "col": 1},
+                "end": {"line": 1, "col": 1},
+                "extra": {
+                    "message": f"{scanner_name} scan unreliable: {errors_text}",
+                    "severity": "ERROR",
+                    "fix": "",
+                    "metadata": {"category": "BUILD", "confidence": "LOW"},
+                },
+            }
+        )
     return {"semgrep_findings": findings, "timings": timings}
 
 
 def node_fs_checks(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    issues = rkt_engine.fs_checks(state["workspace_path"])
+    with _tracer.trace("PHASE2", "fs_checks") as trace_token:
+        issues = rkt_engine.fs_checks(state["workspace_path"])
+        trace_token.set_result(issues, f"findings={len(issues)}")
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["fs_checks_ms"] = round(elapsed, 1)
@@ -184,8 +242,14 @@ def node_context_filter(state: TriageState) -> dict:
         raw.append({"source": _scan_src, "finding": f, "fix_mode": "GUIDED", "confidence": 0.75})
     for f in (state.get("fs_issues") or []):
         raw.append({"source": "fs_checks", "finding": f, "fix_mode": "GUIDED", "confidence": 0.75})
+    for f in (state.get("schema_findings") or []):
+        if not f.get("found", True):  # found=False means the required pattern is missing
+            mode, conf = _score_schema_finding(f)
+            raw.append({"source": "schema", "finding": f, "fix_mode": mode, "confidence": conf})
 
-    result = filter_findings(raw, workspace)
+    with _tracer.trace("PHASE2", "context_filter") as trace_token:
+        result = filter_findings(raw, workspace)
+        trace_token.set_output(f"in={len(raw)} out={len(result.get('active', []))}")
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["context_filter_ms"] = round(elapsed, 1)
@@ -198,7 +262,13 @@ def node_context_filter(state: TriageState) -> dict:
 
 def node_deduplicate(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    deduped = deduplicate(state.get("filtered_findings") or [])
+    before = state.get("filtered_findings") or []
+    with _tracer.trace("PHASE2", "dedup") as trace_token:
+        deduped = deduplicate(before)
+        trace_token.set_output(f"in={len(before)} out={len(deduped)}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("after dedup", len(deduped))
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["dedup_ms"] = round(elapsed, 1)
@@ -207,10 +277,18 @@ def node_deduplicate(state: TriageState) -> dict:
 
 def node_symptom_rank(state: TriageState) -> dict:
     t0 = time.perf_counter()
-    ranked, symptom_cat = rank_findings(
-        state.get("findings_scored") or [],
-        state.get("issue_description") or "",
-    )
+    with _tracer.trace("PHASE2", "symptom_ranker") as trace_token:
+        ranked, symptom_cat = rank_findings(
+            state.get("findings_scored") or [],
+            state.get("issue_description") or "",
+        )
+        top = ""
+        if ranked:
+            top = (ranked[0].get("finding") or {}).get("chain") or ranked[0].get("source", "")
+        trace_token.set_output(f"top={top or '-'} symptom={symptom_cat or '-'}")
+        logger = _tracer.get_logger()
+        if logger and top:
+            logger.set_finding("top finding", top)
     elapsed = (time.perf_counter() - t0) * 1000
     timings = dict(state.get("timings") or {})
     timings["symptom_rank_ms"] = round(elapsed, 1)
@@ -234,6 +312,15 @@ def node_db_lookup(state: TriageState) -> dict:
 
 
 def node_score_and_route(state: TriageState) -> dict:
+    with _tracer.trace("PHASE3", "score_and_route") as trace_token:
+        result = _score_and_route_impl(state)
+        trace_token.set_output(
+            f"mode={result.get('fix_mode')} confidence={result.get('overall_confidence')}"
+        )
+        return result
+
+
+def _score_and_route_impl(state: TriageState) -> dict:
     scored: List[Dict[str, Any]] = []
 
     # Score deduped pre-scored entries (produced by node_deduplicate)
@@ -246,6 +333,8 @@ def node_score_and_route(state: TriageState) -> dict:
             mode, conf = _score_cw_finding(f)
         elif src in ("semgrep", "probe"):
             mode, conf = _score_semgrep_finding(f)
+        elif src == "schema":
+            mode, conf = _score_schema_finding(f)
         else:
             mode, conf = "GUIDED", 0.75
 
@@ -269,6 +358,14 @@ def node_score_and_route(state: TriageState) -> dict:
     else:
         avg_conf = 0.0
 
+    # db_match boosts confidence when no direct findings exist or findings are weak.
+    # Cap at 0.74 (high-MED) — a pattern match alone never triggers AUTO.
+    db_match = state.get("db_match")
+    if db_match and (not scored or avg_conf < 0.60):
+        db_conf = min(float(db_match.get("_score", 0.75)), 0.74)
+        if db_conf > avg_conf:
+            avg_conf = db_conf
+
     overall_mode = _overall_fix_mode(avg_conf, auto_count)
 
     # Primary category from fingerprint or most common finding
@@ -284,6 +381,8 @@ def node_score_and_route(state: TriageState) -> dict:
     }
 
 
+# Available for future use when fix_plan is populated at triage time.
+# Not in _PIPELINE — fix_plan is built in diagnose_output.py after run_triage().
 def node_validate_fix(state: TriageState) -> dict:
     """Run oxlint on any fix proposals if oxc is available. Non-blocking."""
     fix_plan = state.get("fix_plan")
@@ -358,6 +457,8 @@ def node_build_summary(state: TriageState) -> dict:
                 path = f.get("path", "")
                 line = f.get("start", {}).get("line", "?")
                 msg  = f"{rule} @ {path}:{line}"
+            elif src == "schema":
+                msg = f.get("fix_hint") or f.get("check", "")
             else:  # fs_checks
                 msg = f.get("message", "")
 
@@ -393,59 +494,28 @@ def node_build_summary(state: TriageState) -> dict:
     return {"summary": "\n".join(lines)}
 
 
-# ── Graph assembly ────────────────────────────────────────────────────────────
+# ── Pipeline definition ───────────────────────────────────────────────────────
 
-def _build_graph() -> Any:
-    g = StateGraph(TriageState)
-
-    g.add_node("fingerprint",      node_fingerprint)
-    g.add_node("chain_walker",     node_chain_walker)
-    g.add_node("schema",           node_schema)
-    g.add_node("semgrep",          node_semgrep)
-    g.add_node("fs_checks",        node_fs_checks)
-    g.add_node("context_filter",   node_context_filter)
-    g.add_node("deduplicate",      node_deduplicate)
-    g.add_node("db_lookup",        node_db_lookup)
-    g.add_node("score_and_route",  node_score_and_route)
-    g.add_node("symptom_rank",     node_symptom_rank)
-    g.add_node("validate_fix",     node_validate_fix)
-    g.add_node("build_summary",    node_build_summary)
-
-    g.set_entry_point("fingerprint")
-    g.add_edge("fingerprint",      "chain_walker")
-    g.add_edge("chain_walker",     "schema")
-    g.add_edge("schema",           "semgrep")
-    g.add_edge("semgrep",          "fs_checks")
-    g.add_edge("fs_checks",        "context_filter")
-    g.add_edge("context_filter",   "deduplicate")
-    g.add_edge("deduplicate",      "db_lookup")
-    g.add_edge("db_lookup",        "score_and_route")
-    g.add_edge("score_and_route",  "symptom_rank")
-    g.add_edge("symptom_rank",     "validate_fix")
-    g.add_edge("validate_fix",     "build_summary")
-    g.add_edge("build_summary",    END)
-
-    return g.compile()
-
-
-_GRAPH = None
-
-
-def _get_graph():
-    global _GRAPH
-    if _GRAPH is None:
-        _GRAPH = _build_graph()
-    return _GRAPH
+_PIPELINE = [
+    node_fingerprint,
+    node_chain_walker,
+    node_schema,
+    node_semgrep,
+    node_fs_checks,
+    node_context_filter,
+    node_deduplicate,
+    node_db_lookup,
+    node_score_and_route,
+    node_symptom_rank,
+    node_build_summary,
+]
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_triage(workspace_path: str, issue_description: str, port: int = 3000) -> Dict[str, Any]:
-    """
-    Run the full triage pipeline on workspace_path.
-    Returns the final state dict.
-    """
-    initial: TriageState = {
+def run_triage(workspace_path: str, issue_description: str, port: int = 3000) -> Dict:
+    _tracer.init_if_env()
+    state: Dict = {
         "workspace_path":      os.path.abspath(os.path.expanduser(workspace_path)),
         "issue_description":   issue_description,
         "port":                port,
@@ -464,9 +534,12 @@ def run_triage(workspace_path: str, issue_description: str, port: int = 3000) ->
         "fix_mode":            "MANUAL",
         "auto_fixable_count":  0,
         "symptom_category":    None,
+        "fix_plan":            None,
+        "oxc_validation_errors": [],
+        "oxc_context":         "",
         "timings":             {},
         "summary":             "",
     }
-    graph  = _get_graph()
-    result = graph.invoke(initial)
-    return dict(result)
+    for node_fn in _PIPELINE:
+        state.update(node_fn(state))
+    return state
