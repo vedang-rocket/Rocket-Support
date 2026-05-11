@@ -5,7 +5,7 @@ PATH A — brain.db has a verified unified diff for this pattern:
     Apply it directly with string matching. Zero tokens, <1ms.
 
 PATH B — No known diff or diff not applicable:
-    Call Claude API (claude-sonnet-4-5) with surgical slicer context.
+    Call Claude API (claude-sonnet-4-6) with surgical slicer context.
     Claude returns exact JSON changes. Engine applies them.
 
 Both paths write atomically and fall through gracefully on failure.
@@ -26,6 +26,8 @@ sys.path.insert(0, ENGINE_DIR)
 
 import tracer as _tracer
 from finding_resolver import resolve
+
+_CLAUDE_MODEL = "claude-sonnet-4-6"
 
 
 def _load_dotenv(env_path: str = os.path.join(ENGINE_DIR, ".env")) -> None:
@@ -432,7 +434,7 @@ If you are not certain of the exact fix → return:
             client = anthropic.Anthropic()
             response = _tracer.trace_claude(
                 client,
-                model="claude-sonnet-4-5",
+                model=_CLAUDE_MODEL,
                 max_tokens=1000,
                 system="You are a surgical code fixer. Return only valid JSON. Never explain. Never use markdown.",
                 messages=[{"role": "user", "content": prompt}],

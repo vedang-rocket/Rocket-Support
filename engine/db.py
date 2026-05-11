@@ -11,6 +11,7 @@ import sys
 import hashlib
 import datetime
 import subprocess
+import concurrent.futures
 from typing import Optional, List, Dict, Any
 
 import tracer as _tracer
@@ -252,12 +253,20 @@ class SemanticIndex:
         if self._index is None:
             return []
         try:
-            matches = self._index.search(vec, top_k)
+            index_ref = self._index
+            id_map_ref = self._id_map
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                future = _ex.submit(index_ref.search, vec, top_k)
+                try:
+                    matches = future.result(timeout=5)
+                except concurrent.futures.TimeoutError:
+                    self._index = None  # evict corrupt/hung index
+                    return []
             results = []
             for pos, dist in zip(matches.keys, matches.distances):
                 pos = int(pos)
-                if pos < len(self._id_map):
-                    results.append({"id": self._id_map[pos], "score": float(1.0 - dist)})
+                if pos < len(id_map_ref):
+                    results.append({"id": id_map_ref[pos], "score": float(1.0 - dist)})
             return results
         except Exception:
             return []

@@ -853,6 +853,7 @@ def main() -> int:
     agent_result = None
     loop_result = None
     shadow_manual_preview: list = []
+    _fixed_cw_findings: list = []  # cw_findings actually targeted by the applied fix
 
     if shadow:
         # MANUAL middleware preview is always read-only — compute first
@@ -899,6 +900,10 @@ def main() -> int:
     ):
         # chain_walker found middleware missing updateSession — always use deterministic rewriter
         # regardless of overall fix_mode (probe findings can push avg_conf to AUTO)
+        _fixed_cw_findings = [
+            f for f in (state.get("cw_findings") or [])
+            if "middleware" in f.get("broken_at", "").lower()
+        ]
         manual_changes = _invoke_claude_manual_fixes(state, repo_path, hint)
         all_claude_changes.extend(manual_changes)
         if manual_changes:
@@ -909,6 +914,10 @@ def main() -> int:
             _step_warn("middleware finding — check middleware.ts manually")
 
     elif state.get("fix_mode") == "MANUAL":
+        _fixed_cw_findings = [
+            f for f in (state.get("cw_findings") or [])
+            if "middleware" in f.get("broken_at", "").lower()
+        ]
         manual_changes = _invoke_claude_manual_fixes(state, repo_path, hint)
         all_claude_changes.extend(manual_changes)
         if manual_changes:
@@ -1064,9 +1073,12 @@ def main() -> int:
                     new_findings = cw_mod.walk(repo_path)
                     trace_token.set_output(f"findings={len(new_findings)}")
 
+            # Only check findings targeted by the applied fix. Falls back to all
+            # cw_findings when no targeted set was recorded (e.g. fix_writer path).
+            _check_cw = _fixed_cw_findings or (state.get("cw_findings") or [])
             orig_issues = {
                 (f.get("chain"), f.get("missing"))
-                for f in (state.get("cw_findings") or [])
+                for f in _check_cw
             }
             remaining = [
                 f for f in new_findings

@@ -13,6 +13,7 @@ Usage:
 """
 import os
 import sys
+import tempfile
 from typing import Any, Dict, List, Optional
 
 DEFAULT_INDEX_PATH = os.path.expanduser("~/.rocket-support/brain_fts")
@@ -40,7 +41,7 @@ class BrainFTS:
     def _build_schema(self):
         import tantivy
         builder = tantivy.SchemaBuilder()
-        builder.add_integer_field("id", stored=True, indexed=True)
+        builder.add_text_field("fix_id", stored=True, tokenizer_name="raw")
         builder.add_text_field("category", stored=True, tokenizer_name="raw")
         builder.add_text_field("symptom", stored=True, tokenizer_name="en_stem")
         builder.add_text_field("error_msg", stored=True, tokenizer_name="en_stem")
@@ -60,7 +61,7 @@ class BrainFTS:
         except Exception:
             self._index = tantivy.Index(schema, path=self.index_path)
 
-    def add_doc(self, row_id: int, category: str, symptom: str,
+    def add_doc(self, fix_id: str, category: str, symptom: str,
                 error_msg: str, fix_summary: str) -> None:
         self._open_or_create()
         if self._index is None:
@@ -69,7 +70,7 @@ class BrainFTS:
             self._writer = self._index.writer()
         import tantivy
         doc = tantivy.Document(
-            id=row_id,
+            fix_id=fix_id or "",
             category=category or "",
             symptom=symptom or "",
             error_msg=error_msg or "",
@@ -93,30 +94,55 @@ class BrainFTS:
         db.init_db()
         conn = db.get_conn()
         rows = conn.execute(
-            "SELECT id, pattern, error_signature, category, fix_diff FROM fixes"
+            "SELECT id, pattern, error_signature, category, fix_diff, verified FROM fixes"
         ).fetchall()
         conn.close()
 
-        # Wipe and recreate index
         import shutil
-        if os.path.exists(self.index_path):
-            shutil.rmtree(self.index_path)
+        parent_dir = os.path.dirname(self.index_path) or "."
+        os.makedirs(parent_dir, exist_ok=True)
+        temp_path = tempfile.mkdtemp(
+            prefix=f"{os.path.basename(self.index_path)}.tmp.",
+            dir=parent_dir,
+        )
+        backup_path = None
+        try:
+            temp_fts = BrainFTS(index_path=temp_path)
+            for row in rows:
+                temp_fts.add_doc(
+                    fix_id=row["id"] or "",
+                    category=row["category"] or "",
+                    symptom=row["pattern"] or "",
+                    error_msg=row["error_signature"] or "",
+                    fix_summary=(row["fix_diff"] or "")[:200],
+                )
+            temp_fts.commit()
+
+            if os.path.exists(self.index_path):
+                backup_path = f"{self.index_path}.bak.{os.getpid()}"
+                if os.path.exists(backup_path):
+                    shutil.rmtree(backup_path, ignore_errors=True)
+                os.rename(self.index_path, backup_path)
+            os.rename(temp_path, self.index_path)
+            if backup_path and os.path.exists(backup_path):
+                shutil.rmtree(backup_path, ignore_errors=True)
+        except Exception:
+            if os.path.exists(temp_path):
+                shutil.rmtree(temp_path, ignore_errors=True)
+            if (
+                backup_path
+                and os.path.exists(backup_path)
+                and not os.path.exists(self.index_path)
+            ):
+                os.rename(backup_path, self.index_path)
+            raise
+
         self._index = None
         self._writer = None
-
-        for i, row in enumerate(rows):
-            self.add_doc(
-                row_id=i,
-                category=row["category"] or "",
-                symptom=row["pattern"] or "",
-                error_msg=row["error_signature"] or "",
-                fix_summary=(row["fix_diff"] or "")[:200],
-            )
-        self.commit()
         return len(rows)
 
     def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """BM25 search. Returns [{id, category, score}, ...] sorted by score desc."""
+        """BM25 search. Returns [{id: hex_fix_id, category, score}, ...] sorted by score desc."""
         if not _check_tantivy():
             return []
         self._open_or_create()
@@ -132,14 +158,14 @@ class BrainFTS:
             for score, addr in results:
                 doc = searcher.doc(addr)
                 try:
-                    row_id = doc["id"][0]
+                    fix_id = doc["fix_id"][0]
                 except (KeyError, IndexError, TypeError):
-                    row_id = 0
+                    fix_id = ""
                 try:
                     category = doc["category"][0]
                 except (KeyError, IndexError, TypeError):
                     category = ""
-                out.append({"id": row_id, "category": category, "score": float(score)})
+                out.append({"id": fix_id, "category": category, "score": float(score)})
             return out
         except Exception:
             return []
