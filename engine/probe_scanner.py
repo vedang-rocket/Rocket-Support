@@ -94,12 +94,13 @@ def _collect_ts_files(repo_path: str) -> List[str]:
 
 
 def _run_rg(args: List[str]) -> List[Dict]:
-    """Run rg --json and return parsed match objects."""
+    """Run rg --json and return parsed match objects. Capped at 100 per file."""
+    args = ["--max-count", "100"] + list(args)
     if _tracer.get_logger() is not None:
         return _tracer.trace_rg(args)
     try:
         r = subprocess.run(
-            [_RG, "--json", "--max-count", "100"] + args,
+            [_RG, "--json"] + args,
             capture_output=True, text=True, timeout=10,
         )
         results = []

@@ -49,6 +49,11 @@ def _try_sentence_transformers(text: str) -> Optional[List[float]]:
     if _st_available is False:
         return None
     if _st_available is None:
+        # Never import sentence_transformers on demand — loading PyTorch cold costs 8-15GB RSS.
+        # Only reuse the model if it is already loaded elsewhere in this process.
+        if "sentence_transformers" not in sys.modules:
+            _st_available = False
+            return None
         try:
             from sentence_transformers import SentenceTransformer
             _st_model = SentenceTransformer("all-MiniLM-L6-v2")
