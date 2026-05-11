@@ -610,6 +610,19 @@ $FAILURE_MODES_BLOCK
 8. \`export const dynamic = 'force-dynamic'\` on all authenticated pages
 $RULE9
 
+## Hard rules for ALL code changes
+
+These rules apply to every change in every file. No exceptions.
+
+- Change maximum 1 file per fix unless explicitly told otherwise
+- Change maximum 3 lines per fix
+- Never reformat surrounding code
+- Never rename existing variables
+- Never add comments to existing code
+- Never change indentation of lines you are not fixing
+- State the exact change before making it
+- If unsure → ask, do not guess
+
 ## Supabase Client — Which File
 | Context | Import from |
 |---|---|
