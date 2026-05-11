@@ -893,6 +893,21 @@ def main() -> int:
     elif overall_conf < 0.60:
         _step_warn(f"LOW confidence ({overall_conf:.0%}) — investigate in Cursor")
 
+    elif any(
+        "middleware" in f.get("broken_at", "").lower()
+        for f in (state.get("cw_findings") or [])
+    ):
+        # chain_walker found middleware missing updateSession — always use deterministic rewriter
+        # regardless of overall fix_mode (probe findings can push avg_conf to AUTO)
+        manual_changes = _invoke_claude_manual_fixes(state, repo_path, hint)
+        all_claude_changes.extend(manual_changes)
+        if manual_changes:
+            result["fixes_applied"] = True
+            result["files_changed"] = len(manual_changes)
+            _step_done(f"{len(manual_changes)} fix(es) applied · deterministic")
+        else:
+            _step_warn("middleware finding — check middleware.ts manually")
+
     elif state.get("fix_mode") == "MANUAL":
         manual_changes = _invoke_claude_manual_fixes(state, repo_path, hint)
         all_claude_changes.extend(manual_changes)

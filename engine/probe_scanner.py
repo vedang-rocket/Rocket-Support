@@ -12,6 +12,7 @@ Rule mapping:
   Rule 5 (supabase-wrong-import)      → rg + path glob
   Rule 6 (cookies-without-await)      → ast-grep-py (rg fallback)
   Rule 7 (next-public-secret-key)     → rg + path glob
+  Rule 13 (client-no-storage-fallback)→ rg + file-content check
 """
 
 import os
@@ -19,6 +20,8 @@ import json
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
+
+import tracer as _tracer
 
 _RG  = shutil.which("rg")  or "/usr/local/bin/rg"
 _FD  = shutil.which("fd")  or "/usr/local/bin/fd"
@@ -92,6 +95,8 @@ def _collect_ts_files(repo_path: str) -> List[str]:
 
 def _run_rg(args: List[str]) -> List[Dict]:
     """Run rg --json and return parsed match objects."""
+    if _tracer.get_logger() is not None:
+        return _tracer.trace_rg(args)
     try:
         r = subprocess.run(
             [_RG, "--json"] + args,
@@ -119,6 +124,8 @@ def scan_getsession(ts_files: List[str]) -> List[Dict[str, Any]]:
     if _AST_GREP_AVAILABLE:
         for fpath in ts_files:
             try:
+                if os.path.getsize(fpath) > 200_000:
+                    continue
                 with open(fpath, encoding="utf-8", errors="replace") as fh:
                     source = fh.read()
                 root = SgRoot(source, "typescript")
@@ -274,6 +281,58 @@ def scan_supabase_wrong_import(repo_path: str) -> List[Dict[str, Any]]:
     return findings
 
 
+# ── Rule 13: createBrowserClient without localStorage fallback ───────────────
+
+def scan_client_storage_fallback(repo_path: str) -> List[Dict[str, Any]]:
+    """client.ts uses createBrowserClient without localStorage fallback."""
+    findings: List[Dict] = []
+    seen_files = set()
+    matches = _run_rg(
+        [
+            "-n",
+            r"createBrowserClient\s*\(",
+            "--glob",
+            "lib/supabase/client.ts",
+            "--glob",
+            "src/lib/supabase/client.ts",
+            repo_path,
+        ]
+    )
+    for match in matches:
+        fpath = match["path"]["text"]
+        if fpath in seen_files:
+            continue
+        seen_files.add(fpath)
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        if "localStorage" in content or "localstorage" in content.lower():
+            continue
+        lno = match["line_number"]
+        col = match["submatches"][0]["start"] if match.get("submatches") else 0
+        findings.append(
+            _make_finding(
+                check_id="supabase-client-no-storage-fallback",
+                path=fpath,
+                start_line=lno,
+                start_col=col,
+                end_line=lno,
+                end_col=col + 20,
+                message=(
+                    "createBrowserClient in client.ts has no localStorage fallback; "
+                    "refresh token can fail when third-party cookies are blocked."
+                ),
+                severity="WARNING",
+                fix="Add cookies.getAll/setAll with localStorage fallback in createBrowserClient options",
+                category="AUTH",
+                confidence="MED",
+            )
+        )
+    return findings
+
+
 # ── Rule 6: cookies() without await ──────────────────────────────────────────
 
 def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
@@ -287,6 +346,8 @@ def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
         ]
         for fpath in ts_files:
             try:
+                if os.path.getsize(fpath) > 200_000:
+                    continue
                 with open(fpath, encoding="utf-8", errors="replace") as fh:
                     source = fh.read()
                 root = SgRoot(source, "typescript")
@@ -352,6 +413,8 @@ def scan_headers_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
         ]
         for fpath in ts_files:
             try:
+                if os.path.getsize(fpath) > 200_000:
+                    continue
                 with open(fpath, encoding="utf-8", errors="replace") as fh:
                     source = fh.read()
                 root = SgRoot(source, "typescript")
@@ -620,8 +683,8 @@ def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
 
     # rg-based scanners (need repo_path)
     for fn in (scan_auth_helpers, scan_stripe_webhook, scan_supabase_wrong_import,
-               scan_env_secrets, scan_missing_dynamic_export, scan_anon_key_format,
-               scan_use_client_server_import, scan_missing_revalidate):
+               scan_client_storage_fallback, scan_env_secrets, scan_missing_dynamic_export, scan_anon_key_format,
+               scan_use_client_server_import):
         try:
             findings.extend(fn(repo_path))
         except Exception as exc:
