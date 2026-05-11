@@ -96,6 +96,23 @@ def _first_missing(content: str, needles: List[str]) -> Optional[str]:
     return None
 
 
+def _middleware_passes(content: str) -> bool:
+    """
+    Return True if content satisfies the middleware auth-refresh requirement.
+    Accepts two canonical forms:
+      1. updateSession import/call pattern (lib helper approach)
+      2. Inline SSR pattern: createServerClient + supabase.auth.getUser
+    """
+    if "updateSession" in content or "updatesession" in content.lower():
+        return True
+    if (
+        ("createServerClient" in content or "createserverclient" in content.lower())
+        and ("supabase.auth.getUser" in content or "supabase.auth.getuser" in content.lower())
+    ):
+        return True
+    return False
+
+
 # ── Chain definitions ─────────────────────────────────────────────────────────
 
 # Each entry: (file_pattern, [required_strings], issue_message, fix_hint)
@@ -126,6 +143,18 @@ def build_chains(layout: Dict[str, str]) -> Dict[str, List[Tuple]]:
             ["exchangeCodeForSession"],
             "auth callback route missing or lacks exchangeCodeForSession — OAuth PKCE flow broken",
             "Create " + app + "/auth/callback/route.ts calling supabase.auth.exchangeCodeForSession(code)",
+        ),
+        (
+            "lib/supabase/client.ts",
+            ["createBrowserClient", "__REQUIRES_LOCALSTORAGE_FALLBACK__"],
+            "createBrowserClient in lib/supabase/client.ts has no localStorage fallback — refresh token can fail when third-party cookies are blocked",
+            "Add cookies.getAll/setAll with localStorage fallback inside createBrowserClient options",
+        ),
+        (
+            "src/lib/supabase/client.ts",
+            ["createBrowserClient", "__REQUIRES_LOCALSTORAGE_FALLBACK__"],
+            "createBrowserClient in src/lib/supabase/client.ts has no localStorage fallback — refresh token can fail when third-party cookies are blocked",
+            "Add cookies.getAll/setAll with localStorage fallback inside createBrowserClient options",
         ),
     ]
 
@@ -237,7 +266,21 @@ def _walk_chain(
             if content is None:
                 continue  # file not found → skip silently
 
-        missing = _first_missing(content, needles)
+        if "__REQUIRES_LOCALSTORAGE_FALLBACK__" in needles:
+            # Only enforce fallback when createBrowserClient is actually used.
+            if "createBrowserClient" not in content and "createbrowserclient" not in content.lower():
+                continue
+            if "localStorage" not in content and "localstorage" not in content.lower():
+                missing = "localStorage fallback"
+            else:
+                missing = None
+        elif "updateSession" in needles and (
+            rel_path.endswith("middleware.ts") or rel_path.endswith("middleware.js")
+        ):
+            # Accept either the updateSession import pattern or the inline SSR canonical form.
+            missing = None if _middleware_passes(content) else "updateSession"
+        else:
+            missing = _first_missing(content, needles)
         if missing:
             return {
                 "chain":      chain_name,
