@@ -99,7 +99,7 @@ def _run_rg(args: List[str]) -> List[Dict]:
         return _tracer.trace_rg(args)
     try:
         r = subprocess.run(
-            [_RG, "--json"] + args,
+            [_RG, "--json", "--max-count", "100"] + args,
             capture_output=True, text=True, timeout=10,
         )
         results = []
@@ -110,7 +110,7 @@ def _run_rg(args: List[str]) -> List[Dict]:
                     results.append(obj["data"])
             except Exception:
                 pass
-        return results
+        return results[:100]
     except Exception:
         return []
 

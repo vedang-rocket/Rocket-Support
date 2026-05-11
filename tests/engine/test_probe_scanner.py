@@ -77,3 +77,34 @@ def test_scan_missing_revalidate_ignores_with_revalidate():
     )
     findings = probe_scanner.scan_missing_revalidate([path])
     assert len(findings) == 0
+
+
+def test_run_rg_includes_max_count():
+    """_run_rg must pass --max-count 100 to rg to cap memory usage on large repos."""
+    import unittest.mock as mock
+
+    captured_args = []
+
+    def fake_run(args, **kwargs):
+        captured_args.extend(args)
+        result = mock.MagicMock()
+        result.stdout = ""
+        result.returncode = 0
+        return result
+
+    # Disable tracer path so we hit the subprocess.run branch
+    original_get_logger = probe_scanner._tracer.get_logger
+    probe_scanner._tracer.get_logger = lambda: None
+    try:
+        with mock.patch.object(probe_scanner.subprocess, "run", side_effect=fake_run):
+            probe_scanner._run_rg(["-n", "somepattern", "/tmp"])
+    finally:
+        probe_scanner._tracer.get_logger = original_get_logger
+
+    assert "--max-count" in captured_args, (
+        f"_run_rg must pass --max-count to rg; got args: {captured_args}"
+    )
+    idx = captured_args.index("--max-count")
+    assert captured_args[idx + 1] == "100", (
+        f"--max-count value must be '100', got '{captured_args[idx + 1]}'"
+    )
