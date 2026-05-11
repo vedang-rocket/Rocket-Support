@@ -119,10 +119,10 @@ def _run_rg(args: List[str]) -> List[Dict]:
 # ── Rule 1: getSession → getUser ─────────────────────────────────────────────
 
 def scan_getsession(ts_files: List[str]) -> List[Dict[str, Any]]:
-    """$CLIENT.auth.getSession() → ast-grep-py; rg fallback."""
+    """$CLIENT.auth.getSession() → rg (ast-grep disabled: SgRoot leaks ~50MB/file)."""
     findings: List[Dict] = []
 
-    if _AST_GREP_AVAILABLE:
+    if False and _AST_GREP_AVAILABLE:  # noqa: SIM210 — disabled, use rg path below
         for fpath in ts_files:
             try:
                 if os.path.getsize(fpath) > 200_000:
@@ -337,10 +337,10 @@ def scan_client_storage_fallback(repo_path: str) -> List[Dict[str, Any]]:
 # ── Rule 6: cookies() without await ──────────────────────────────────────────
 
 def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
-    """const/let $STORE = cookies() without await → ast-grep-py; rg fallback."""
+    """const/let $STORE = cookies() without await → rg (ast-grep disabled: SgRoot leaks ~50MB/file)."""
     findings: List[Dict] = []
 
-    if _AST_GREP_AVAILABLE:
+    if False and _AST_GREP_AVAILABLE:  # noqa: SIM210 — disabled, use rg path below
         patterns = [
             ("const $STORE = cookies()", "cookies-without-await-const"),
             ("let $STORE = cookies()",   "cookies-without-await-let"),
@@ -404,10 +404,10 @@ def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
 # ── Rule 9: headers() without await ──────────────────────────────────────────
 
 def scan_headers_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
-    """const/let $H = headers() without await → ast-grep-py; rg fallback."""
+    """const/let $H = headers() without await → rg (ast-grep disabled: SgRoot leaks ~50MB/file)."""
     findings: List[Dict] = []
 
-    if _AST_GREP_AVAILABLE:
+    if False and _AST_GREP_AVAILABLE:  # noqa: SIM210 — disabled, use rg path below
         patterns = [
             ("const $H = headers()", "headers-without-await-const"),
             ("let $H = headers()",   "headers-without-await-let"),
