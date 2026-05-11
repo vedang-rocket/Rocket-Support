@@ -13,15 +13,21 @@ def _write_ts(content: str) -> str:
 # ── Rule 9: headers() without await ──────────────────────────────────────────
 
 def test_scan_headers_without_await_detects():
-    path = _write_ts("const headersList = headers()\n")
-    findings = probe_scanner.scan_headers_without_await([path])
+    with tempfile.TemporaryDirectory() as repo:
+        path = os.path.join(repo, "test.ts")
+        with open(path, "w") as fh:
+            fh.write("const headersList = headers()\n")
+        findings = probe_scanner.scan_headers_without_await(repo)
     assert len(findings) == 1
     assert findings[0]["check_id"] == "headers-without-await"
 
 
 def test_scan_headers_without_await_ignores_awaited():
-    path = _write_ts("const headersList = await headers()\n")
-    findings = probe_scanner.scan_headers_without_await([path])
+    with tempfile.TemporaryDirectory() as repo:
+        path = os.path.join(repo, "test.ts")
+        with open(path, "w") as fh:
+            fh.write("const headersList = await headers()\n")
+        findings = probe_scanner.scan_headers_without_await(repo)
     assert len(findings) == 0
 
 

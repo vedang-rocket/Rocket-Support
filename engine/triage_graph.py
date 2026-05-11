@@ -302,7 +302,13 @@ def node_symptom_rank(state: TriageState) -> dict:
 def node_db_lookup(state: TriageState) -> dict:
     t0 = time.perf_counter()
     fp_result  = state.get("fingerprint") or {}
-    category   = fp_result.get("category")
+    # chain_walker category is authoritative; fingerprint is a probabilistic guess.
+    # When fingerprint confidence < 0.50 the guess is unreliable — passing wrong
+    # category to hybrid_lookup silently excludes correct brain.db patterns.
+    cw_findings = state.get("cw_findings") or []
+    cw_category = cw_findings[0].get("chain") if cw_findings else None
+    fp_conf = float(fp_result.get("confidence") or 0.0)
+    category = cw_category or (fp_result.get("category") if fp_conf >= 0.50 else None)
     query = state["issue_description"].strip() or fp_result.get("common_failure", "")
     match = rkt_engine.db_lookup(query.strip(), category=category)
     elapsed = (time.perf_counter() - t0) * 1000

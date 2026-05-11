@@ -234,3 +234,79 @@ Where rule now lives:
 
 Verified: YES
 ---
+
+---
+Date: 2026-05-12
+Ticket: gap-analysis-gap5
+Confidence: HIGH
+Category: ALL
+
+What Claude did wrong:
+N/A — latent crash bug in probe_scanner, not a Claude generation error.
+scan_getsession(), scan_cookies_without_await(), scan_headers_without_await()
+passed all TypeScript file paths as positional argv to rg. On repos with 500+
+files this silently hits ARG_MAX (macOS: 256KB) — rg exits with E2BIG and
+returns zero matches. AUTH and Next.js 15 findings are silently missed.
+
+Permanent fix applied:
+Changed all three function signatures from ts_files: List[str] to repo_path: str.
+rg now receives --glob *.ts --glob *.tsx --glob *.js --glob *.jsx + repo_path.
+rg handles file traversal internally — no argv length constraint.
+run_probe_scanner() updated to pass repo_path to these three functions.
+
+Where rule now lives:
+[x] Other: probe_scanner.py scan_getsession/scan_cookies_without_await/scan_headers_without_await
+
+Verified: YES
+---
+
+---
+Date: 2026-05-12
+Ticket: gap-analysis-gap6
+Confidence: MED
+Category: ALL
+
+What Claude did wrong:
+N/A — inefficiency bug in probe_scanner, not a Claude generation error.
+scan_missing_revalidate() opened each file twice — once to read 300 bytes for the
+"use server" check, then again to read full content. On a 200-file repo this
+doubled file-handle churn for every server action file.
+
+Permanent fix applied:
+Merged into single read: read full content, then check content[:300] for "use server".
+One open() per file instead of two.
+
+Where rule now lives:
+[x] Other: probe_scanner.py scan_missing_revalidate()
+
+Verified: YES
+---
+
+---
+Date: 2026-05-12
+Ticket: gap-analysis-gap7
+Confidence: HIGH
+Category: ALL
+
+What Claude did wrong:
+N/A — wrong category passed to hybrid_lookup when fingerprint confidence is low.
+node_db_lookup() always passed fingerprint.category to hybrid_lookup regardless of
+fingerprint confidence. When confidence < 0.50 the category is an unreliable guess —
+passing it caused hybrid_lookup to filter out correct brain.db patterns.
+E.g., a STRIPE ticket fingerprinted as BUILD at 0.38 confidence never matched
+verified Stripe webhook patterns.
+
+What it should have done:
+Prefer chain_walker category (authoritative, derived from actual code inspection).
+Fall back to fingerprint category only when confidence >= 0.50.
+Pass None (no filter) when fingerprint is low-confidence and chain_walker found nothing.
+
+Permanent fix applied:
+node_db_lookup() now extracts cw_category from cw_findings[0]["chain"] when available.
+Uses cw_category if set, else fp_result["category"] only when fp_conf >= 0.50, else None.
+
+Where rule now lives:
+[x] Other: triage_graph.py node_db_lookup()
+
+Verified: YES
+---

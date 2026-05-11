@@ -118,12 +118,12 @@ def _run_rg(args: List[str]) -> List[Dict]:
 
 # ── Rule 1: getSession → getUser ─────────────────────────────────────────────
 
-def scan_getsession(ts_files: List[str]) -> List[Dict[str, Any]]:
-    """$CLIENT.auth.getSession() → rg (ast-grep disabled: SgRoot leaks ~50MB/file)."""
+def scan_getsession(repo_path: str) -> List[Dict[str, Any]]:
+    """$CLIENT.auth.getSession() → rg with --glob to avoid argv overflow on large repos."""
     findings: List[Dict] = []
 
     if False and _AST_GREP_AVAILABLE:  # noqa: SIM210 — disabled, use rg path below
-        for fpath in ts_files:
+        for fpath in _collect_ts_files(repo_path):
             try:
                 if os.path.getsize(fpath) > 200_000:
                     continue
@@ -152,8 +152,10 @@ def scan_getsession(ts_files: List[str]) -> List[Dict[str, Any]]:
                 pass
         return findings
 
-    # rg fallback
-    for match in _run_rg(["-n", r"\.auth\.getSession\(\)"] + ts_files):
+    # rg with glob — no argv overflow risk regardless of repo size
+    for match in _run_rg(["-n", r"\.auth\.getSession\(\)",
+                          "--glob", "*.ts", "--glob", "*.tsx",
+                          "--glob", "*.js", "--glob", "*.jsx", repo_path]):
         fpath = match["path"]["text"]
         lno   = match["line_number"]
         col   = match["submatches"][0]["start"] if match.get("submatches") else 0
@@ -336,8 +338,8 @@ def scan_client_storage_fallback(repo_path: str) -> List[Dict[str, Any]]:
 
 # ── Rule 6: cookies() without await ──────────────────────────────────────────
 
-def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
-    """const/let $STORE = cookies() without await → rg (ast-grep disabled: SgRoot leaks ~50MB/file)."""
+def scan_cookies_without_await(repo_path: str) -> List[Dict[str, Any]]:
+    """const/let $STORE = cookies() without await → rg with --glob to avoid argv overflow."""
     findings: List[Dict] = []
 
     if False and _AST_GREP_AVAILABLE:  # noqa: SIM210 — disabled, use rg path below
@@ -345,7 +347,7 @@ def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
             ("const $STORE = cookies()", "cookies-without-await-const"),
             ("let $STORE = cookies()",   "cookies-without-await-let"),
         ]
-        for fpath in ts_files:
+        for fpath in _collect_ts_files(repo_path):
             try:
                 if os.path.getsize(fpath) > 200_000:
                     continue
@@ -378,9 +380,11 @@ def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
                 pass
         return findings
 
-    # rg fallback — match unawaited cookies() assignment
+    # rg with glob — no argv overflow risk regardless of repo size
     pattern = r"(?:const|let)\s+\w+\s*=\s*cookies\(\)"
-    for match in _run_rg(["-n", pattern] + ts_files):
+    for match in _run_rg(["-n", pattern,
+                          "--glob", "*.ts", "--glob", "*.tsx",
+                          "--glob", "*.js", "--glob", "*.jsx", repo_path]):
         fpath = match["path"]["text"]
         lno   = match["line_number"]
         col   = match["submatches"][0]["start"] if match.get("submatches") else 0
@@ -403,8 +407,8 @@ def scan_cookies_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
 
 # ── Rule 9: headers() without await ──────────────────────────────────────────
 
-def scan_headers_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
-    """const/let $H = headers() without await → rg (ast-grep disabled: SgRoot leaks ~50MB/file)."""
+def scan_headers_without_await(repo_path: str) -> List[Dict[str, Any]]:
+    """const/let $H = headers() without await → rg with --glob to avoid argv overflow."""
     findings: List[Dict] = []
 
     if False and _AST_GREP_AVAILABLE:  # noqa: SIM210 — disabled, use rg path below
@@ -412,7 +416,7 @@ def scan_headers_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
             ("const $H = headers()", "headers-without-await-const"),
             ("let $H = headers()",   "headers-without-await-let"),
         ]
-        for fpath in ts_files:
+        for fpath in _collect_ts_files(repo_path):
             try:
                 if os.path.getsize(fpath) > 200_000:
                     continue
@@ -445,9 +449,11 @@ def scan_headers_without_await(ts_files: List[str]) -> List[Dict[str, Any]]:
                 pass
         return findings
 
-    # rg fallback
+    # rg with glob — no argv overflow risk regardless of repo size
     pattern = r"(?:const|let)\s+\w+\s*=\s*headers\(\)"
-    for match in _run_rg(["-n", pattern] + ts_files):
+    for match in _run_rg(["-n", pattern,
+                          "--glob", "*.ts", "--glob", "*.tsx",
+                          "--glob", "*.js", "--glob", "*.jsx", repo_path]):
         fpath = match["path"]["text"]
         lno   = match["line_number"]
         col   = match["submatches"][0]["start"] if match.get("submatches") else 0
@@ -626,16 +632,10 @@ def scan_missing_revalidate(ts_files: List[str]) -> List[Dict[str, Any]]:
     for fpath in ts_files:
         try:
             with open(fpath, encoding="utf-8", errors="replace") as fh:
-                first_300 = fh.read(300)
-            if "use server" not in first_300:
-                continue
-        except OSError:
-            continue
-
-        try:
-            with open(fpath, encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
         except OSError:
+            continue
+        if "use server" not in content[:300]:
             continue
 
         has_mutation  = bool(_re.search(mutation_pattern, content))
@@ -674,13 +674,18 @@ def run_probe_scanner(repo_path: str) -> Dict[str, Any]:
     findings: List[Dict] = []
     errors:   List[str]  = []
 
-    # AST-based scanners (need ts_files list)
-    for fn in (scan_getsession, scan_cookies_without_await, scan_headers_without_await,
-               scan_missing_revalidate):
+    # rg-glob scanners — accept repo_path (no argv overflow risk)
+    for fn in (scan_getsession, scan_cookies_without_await, scan_headers_without_await):
         try:
-            findings.extend(fn(ts_files))
+            findings.extend(fn(repo_path))
         except Exception as exc:
             errors.append(f"{fn.__name__}: {exc}")
+
+    # Needs ts_files to read file content for 'use server' check
+    try:
+        findings.extend(scan_missing_revalidate(ts_files))
+    except Exception as exc:
+        errors.append(f"scan_missing_revalidate: {exc}")
 
     # rg-based scanners (need repo_path)
     for fn in (scan_auth_helpers, scan_stripe_webhook, scan_supabase_wrong_import,
