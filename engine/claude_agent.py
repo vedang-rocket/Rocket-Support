@@ -107,6 +107,7 @@ class ClaudeAgent:
                 # fall through to PATH B
 
         # PATH B — Claude Code CLI (full cursor rules, real file access, runs tsc itself)
+        _cc_error = ""
         try:
             from claude_code_agent import run_claude_code_fix
             cc = run_claude_code_fix(
@@ -127,8 +128,18 @@ class ClaudeAgent:
                     error="",
                     path_used="claude_code_cli",
                 )
-        except Exception:
-            pass  # fall through to PATH C
+            _cc_error = cc.get("error", "") or "success=False"
+        except Exception as _e:
+            _cc_error = f"exception: {str(_e)[:80]}"
+
+        # Log PATH B failure to trace log so it appears in rkt-trace / rkt-replay output
+        _trace_log = os.environ.get("RKT_TRACE_LOG", "")
+        if _trace_log and _cc_error:
+            try:
+                with open(_trace_log, "a") as _f:
+                    _f.write(f"PATH_B claude_code_cli failed: {_cc_error}\n")
+            except Exception:
+                pass
 
         # PATH C — Raw Claude API (fallback)
         return self._claude_api_fix(findings, repo_path, db_match, hint, shadow=shadow)

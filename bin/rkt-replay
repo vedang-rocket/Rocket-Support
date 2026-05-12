@@ -355,23 +355,41 @@ DIFF_T0="$(now_ms)"
 ENGINE_FILES_CHANGED=""
 
 if [[ "$FIXES_APPLIED" == "True" ]]; then
-  # Which files differ?
-  ENGINE_FILES_CHANGED=$(diff -rq \
+  # Run diff once; capture output for reuse
+  _DIFF_RAW=$(diff -rq \
     --exclude="*.tmp" \
     --exclude=".rkt_*" \
     --exclude=".rkt_result.json" \
     --exclude="*.rkt_backup" \
     "$CLEAN_SNAPSHOT" \
     "$LOCAL_TMP" \
-    2>/dev/null \
+    2>/dev/null)
+
+  # Modified files: "Files A and B differ"
+  _ENGINE_MODIFIED=$(echo "$_DIFF_RAW" \
     | grep "^Files" \
     | sed "s|Files $CLEAN_SNAPSHOT/||; s| and $LOCAL_TMP/.*||" \
     | head -20)
 
+  # New files added by engine: "Only in LOCAL_TMP/..." — filter dirs with -f check
+  _ENGINE_ADDED=$(echo "$_DIFF_RAW" \
+    | grep "^Only in $LOCAL_TMP" \
+    | sed "s|^Only in $LOCAL_TMP/||; s|: |/|" \
+    | while IFS= read -r _rel; do
+        [[ -f "$LOCAL_TMP/$_rel" ]] && echo "$_rel"
+      done \
+    | head -20)
+
+  # Combined for match calculation
+  ENGINE_FILES_CHANGED=$(printf "%s\n%s" "$_ENGINE_MODIFIED" "$_ENGINE_ADDED" | grep .)
+
   if [[ -n "$ENGINE_FILES_CHANGED" ]]; then
     echo ""
-    echo "$ENGINE_FILES_CHANGED" | while read -r f; do
+    echo "$_ENGINE_MODIFIED" | grep . | while read -r f; do
       echo -e "  ${GREEN}M${NC}  $f"
+    done
+    echo "$_ENGINE_ADDED" | grep . | while read -r f; do
+      echo -e "  ${GREEN}A${NC}  $f"
     done
     echo ""
     echo "  DETAILED DIFF:"
@@ -467,18 +485,6 @@ fi
 log_phase "REPLAY" "diff:engine-vs-engineer" "OK" "$DIFF_MS" \
   "match=$MATCH ($MATCH_DETAIL)"
 
-# ── Restore remote ────────────────────────────────────────────────────────────
-echo ""
-printf "  Restoring remote git state..."
-
-PHASE_T0="$(now_ms)"
-_restore_remote
-_REMOTE_RESTORE_DONE="true"
-RESTORE_MS="$(( $(now_ms) - PHASE_T0 ))"
-
-log_phase "REPLAY" "git:restore-remote" "OK" "$RESTORE_MS"
-printf "  \033[0;32m✓\033[0m\n"
-
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "  \033[1m════════════════════════════════════════════════════\033[0m"
@@ -515,20 +521,43 @@ case "$MATCH" in
 esac
 
 echo ""
-printf "  %-18s %s\n" "Engine diff:" "$LOCAL_TMP"
-printf "  %-18s %s\n" "Clean snapshot:" "$CLEAN_SNAPSHOT"
-echo ""
 echo -e "  \033[1m════════════════════════════════════════════════════\033[0m"
 
-# ── Open Cursor ───────────────────────────────────────────────────────────────
+# ── Open Cursor on remote (SSH) ───────────────────────────────────────────────
 echo ""
-printf "  \033[1mOpen in Cursor?\033[0m  [Enter to open · Ctrl+C to skip] "
+printf "  \033[1mOpen in Cursor on remote?\033[0m  [Enter to open · Ctrl+C to skip] "
 read -r _CURSOR_REPLY 2>/dev/null || true
-cursor "$LOCAL_TMP" &>/dev/null &
 
+if [[ "$FIXES_APPLIED" == "True" ]]; then
+  # Push engine-modified files back to remote so Cursor shows the changes
+  printf "  Uploading engine changes to remote..."
+  PHASE_T0="$(now_ms)"
+  rsync -az --quiet \
+    --exclude 'node_modules' --exclude '.next' --exclude '.git' \
+    --exclude 'dist' --exclude '.turbo' --exclude '*.log' \
+    --exclude '.rkt_result.json' --exclude '.rkt_*' --exclude '*.rkt_backup' \
+    "$LOCAL_TMP/" "$SSH_HOST:$REMOTE_PROJECT_PATH/" 2>/dev/null
+  log_phase "REPLAY" "rsync:local→remote" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+  printf "  \033[0;32m✓\033[0m\n"
+fi
+
+cursor --remote "ssh-remote+$SSH_HOST" "$REMOTE_PROJECT_PATH" &>/dev/null &
+echo -e "  Opened: ${CYAN}ssh-remote+${SSH_HOST}${NC}  ${REMOTE_PROJECT_PATH}"
 echo ""
-echo "  To see diff in terminal:"
-echo -e "    ${CYAN}diff -ru $CLEAN_SNAPSHOT $LOCAL_TMP${NC}"
+echo "  (Remote will be restored to main after you close this session.)"
+echo "  Press Enter when done reviewing to restore remote..."
+read -r _DONE_REPLY 2>/dev/null || true
+
+# ── Restore remote ────────────────────────────────────────────────────────────
+printf "  Restoring remote git state..."
+
+PHASE_T0="$(now_ms)"
+_restore_remote
+_REMOTE_RESTORE_DONE="true"
+RESTORE_MS="$(( $(now_ms) - PHASE_T0 ))"
+
+log_phase "REPLAY" "git:restore-remote" "OK" "$RESTORE_MS"
+printf "  \033[0;32m✓\033[0m\n"
 echo ""
 
 # ── Cleanup prompt ────────────────────────────────────────────────────────────
