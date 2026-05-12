@@ -7,9 +7,16 @@ export RKT_HOME="$HOME/rocket-support"
 export PATH="$RKT_HOME/bin:$PATH"
 
 # ── core commands ────────────────────────────────────────
-# rkt <url>             — full headless diagnose + fix
-# rkt-open <url>        — interactive session (complex issues)
-# rkt --parallel <urls> — 3-5 repos at once
+# rkt <url>                                    — full headless diagnose + fix
+# rkt-open <url>                               — interactive session (complex issues)
+# rkt --parallel <urls>                        — 3-5 repos at once
+# rkt-diagnose <threadId> [hint]               — SSH init + engine diagnosis + auto-fix
+# rkt-diagnose <threadId> --shadow             — dry-run: diagnosis only, no file changes
+# rkt-replay <threadId> [hint]                 — replay engine on pre-fix state, compare to engineer
+# rkt-replay <threadId> --commit <sha>         — replay against specific commit
+# rkt-replay <threadId> [hint] --keep          — keep local files after replay
+
+alias rkt-replay="$RKT_HOME/bin/rkt-replay"
 
 # ── speed aliases ────────────────────────────────────────
 alias rktl="rkt --log"                    # show recent queries

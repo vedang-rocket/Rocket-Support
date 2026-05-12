@@ -1,0 +1,551 @@
+#!/usr/bin/env bash
+# ============================================================
+#  rkt-replay <threadId> [hint] [--commit <sha>] [--keep]
+#
+#  Replays the engine against the clean (pre-fix) state of a
+#  support ticket and shows what the engine would have changed
+#  vs what the engineer actually did.
+#
+#  Usage:
+#    rkt-replay 69e1d0ddd486e40014029a88
+#    rkt-replay 69e1d0ddd486e40014029a88 "user cannot login"
+#    rkt-replay 69e1d0ddd486e40014029a88 --commit abc1234
+#    rkt-replay 69e1d0ddd486e40014029a88 "hint" --keep
+#
+#  Never rsyncs back to remote. Never rocket push.
+# ============================================================
+
+set -u
+
+THREAD_ID=""
+HINT=""
+EXPLICIT_COMMIT=""
+KEEP="false"
+_SKIP_NEXT="false"
+
+for arg in "$@"; do
+  if [[ "$_SKIP_NEXT" == "true" ]]; then
+    EXPLICIT_COMMIT="$arg"
+    _SKIP_NEXT="false"
+    continue
+  fi
+  case "$arg" in
+    --commit) _SKIP_NEXT="true" ;;
+    --keep)   KEEP="true" ;;
+    *)
+      if [[ -z "$THREAD_ID" ]]; then
+        THREAD_ID="$arg"
+      elif [[ -z "$HINT" ]]; then
+        HINT="$arg"
+      fi
+      ;;
+  esac
+done
+
+SSH_HOST="support-vedang-patel"
+REMOTE_APP_DIR="/home/ubuntu/app"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENGINE_DIR="$SCRIPT_DIR/../engine"
+VENV_PYTHON="$ENGINE_DIR/.venv/bin/python"
+LOCAL_TMP="/tmp/rkt-replay-${THREAD_ID}"
+CLEAN_SNAPSHOT="/tmp/rkt-replay-${THREAD_ID}-clean"
+RESULT_FILE="$LOCAL_TMP/.rkt_result.json"
+
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RED='\033[0;31m'; NC='\033[0m'
+info() { echo -e "  ${CYAN}▸${NC}  $1"; }
+fail() { echo -e "  ${RED}✗${NC}  $1" >&2; exit 1; }
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+if [[ -z "$THREAD_ID" ]]; then
+  echo ""
+  echo -e "  ${BOLD}Usage:${NC}    rkt-replay <threadId> [hint] [--commit <sha>] [--keep]"
+  echo -e "  ${BOLD}Examples:${NC} rkt-replay 69e1d0ddd486e40014029a88"
+  echo -e "            rkt-replay 69e1d0ddd486e40014029a88 \"user cannot login\""
+  echo -e "            rkt-replay 69e1d0ddd486e40014029a88 --commit abc1234"
+  echo ""
+  exit 1
+fi
+
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  fail "Engine venv not found: $VENV_PYTHON"
+fi
+
+# ── Trace instrumentation (copied from rkt-trace) ─────────────────────────────
+now_ms() {
+  perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000'
+}
+
+elapsed_stamp() {
+  local now elapsed minutes seconds millis
+  now="$(now_ms)"
+  elapsed=$((now - TRACE_START_MS))
+  minutes=$((elapsed / 60000))
+  seconds=$(((elapsed % 60000) / 1000))
+  millis=$((elapsed % 1000))
+  printf "%02d:%02d.%03d" "$minutes" "$seconds" "$millis"
+}
+
+log_line() {
+  local line="$1"
+  printf "%s\n" "$line"
+  printf "%s\n" "$line" >> "$TRACE_LOG_PATH"
+}
+
+log_phase() {
+  local phase="$1"
+  local tool="$2"
+  local status="$3"
+  local ms="$4"
+  local detail="${5:-}"
+  local line
+  line=$(printf "[%s] %-7s %-30s %-5s %5sms" "$(elapsed_stamp)" "$phase" "$tool" "$status" "$ms")
+  if [[ -n "$detail" ]]; then
+    line="$line   $detail"
+  fi
+  log_line "$line"
+}
+
+count_files() {
+  "$VENV_PYTHON" - "$1" <<'PY'
+import os, sys
+root = sys.argv[1]
+count = 0
+for _dp, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in {"node_modules", ".next", ".git", "dist", ".turbo"}]
+    count += len(filenames)
+print(count)
+PY
+}
+
+TRACE_START_MS="$(now_ms)"
+TRACE_DIR="$HOME/.rocket-support/traces"
+mkdir -p "$TRACE_DIR"
+TRACE_STAMP="$(date +%Y%m%dT%H%M%S)"
+TRACE_SAFE_THREAD="$(printf "%s" "$THREAD_ID" | tr -c 'A-Za-z0-9_.-' '_')"
+TRACE_LOG_PATH="$TRACE_DIR/replay_${TRACE_SAFE_THREAD}_${TRACE_STAMP}.log"
+
+# Tool wrapper directory for subproc tracing
+TRACE_WRAP_DIR="$(mktemp -d /tmp/rkt-replay-wrap.XXXXXX)"
+
+for TOOL in rg ast-grep tsc rsync npx; do
+  REAL_TOOL="$(command -v "$TOOL" 2>/dev/null || true)"
+  [[ -z "$REAL_TOOL" ]] && continue
+  cat > "$TRACE_WRAP_DIR/$TOOL" <<WRAPPER
+#!/usr/bin/env bash
+now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f\\n", time() * 1000'; }
+_T0=\$(now_ms)
+"$REAL_TOOL" "\$@"
+_EXIT=\$?
+_T1=\$(now_ms)
+_MS=\$((_T1 - _T0))
+printf "[SUBPROC] tool=$TOOL exit=%s ms=%s args=%s\\n" "\$_EXIT" "\$_MS" "\$*" >> "$TRACE_LOG_PATH" 2>/dev/null
+exit "\$_EXIT"
+WRAPPER
+  chmod +x "$TRACE_WRAP_DIR/$TOOL"
+done
+
+export PATH="$TRACE_WRAP_DIR:$PATH"
+export RKT_TRACE="$THREAD_ID"
+export RKT_TRACE_LOG="$TRACE_LOG_PATH"
+export RKT_TRACE_SUPPRESS_START=1
+export PYTHONUNBUFFERED=1
+
+# ── Remote restore trap (always runs on exit) ─────────────────────────────────
+# Populated after we know PROJECT_FOLDER
+_REMOTE_RESTORE_DONE="false"
+PROJECT_FOLDER=""
+LATEST_SUPPORT=""
+
+_restore_remote() {
+  if [[ "$_REMOTE_RESTORE_DONE" == "true" || -z "$PROJECT_FOLDER" ]]; then
+    return
+  fi
+  _REMOTE_RESTORE_DONE="true"
+  TERM=xterm-256color ssh "$SSH_HOST" "
+    cd '$REMOTE_APP_DIR/$PROJECT_FOLDER' && \
+    git checkout main 2>/dev/null || git checkout master 2>/dev/null || true && \
+    git branch -D 'rkt-replay-$THREAD_ID' 2>/dev/null || true && \
+    git stash pop 2>/dev/null || true
+  " >/dev/null 2>&1 || true
+}
+
+_cleanup_wrap() {
+  _restore_remote
+  rm -rf "$TRACE_WRAP_DIR"
+}
+trap _cleanup_wrap EXIT
+
+log_line "[$(elapsed_stamp)] START rkt-replay thread=$THREAD_ID"
+
+echo ""
+echo -e "  ${BOLD}rkt-replay${NC}  ${CYAN}${THREAD_ID}${NC}"
+echo ""
+
+# ── [1/5] SSH init ────────────────────────────────────────────────────────────
+printf "  \033[1;36m[1/5]\033[0m \033[1minitialising project...\033[0m"
+
+PHASE_T0="$(now_ms)"
+TERM=xterm-256color ssh "$SSH_HOST" "echo 'y' | rocket clean 2>&1" >/dev/null 2>&1 || true
+log_phase "PHASE0" "hook:rocket-clean" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+
+PHASE_T0="$(now_ms)"
+INIT_OUTPUT=$(TERM=xterm-256color ssh "$SSH_HOST" "printf '1\ny\n' | rocket init $THREAD_ID 2>&1")
+if ! echo "$INIT_OUTPUT" | /usr/bin/grep -q '"code":"OK"'; then
+  printf "\n"
+  log_phase "PHASE0" "hook:rocket-init" "FAIL" "$(( $(now_ms) - PHASE_T0 ))"
+  fail "rocket init failed — check thread ID: $THREAD_ID"
+fi
+log_phase "PHASE0" "hook:rocket-init" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+
+PHASE_T0="$(now_ms)"
+PROJECT_FOLDER=$(TERM=xterm-256color ssh "$SSH_HOST" "ls -t $REMOTE_APP_DIR 2>/dev/null | /usr/bin/head -1")
+if [[ -z "$PROJECT_FOLDER" ]]; then
+  printf "\n"
+  log_phase "PHASE0" "hook:detect-project" "FAIL" "$(( $(now_ms) - PHASE_T0 ))"
+  fail "Could not detect project folder in ~/app"
+fi
+REMOTE_PROJECT_PATH="$REMOTE_APP_DIR/$PROJECT_FOLDER"
+log_phase "PHASE0" "hook:detect-project" "OK" "$(( $(now_ms) - PHASE_T0 ))" "project=$PROJECT_FOLDER"
+
+printf "  \033[0;32m✓\033[0m  ${PROJECT_FOLDER}\n"
+
+# ── [2/5] Find support commit ─────────────────────────────────────────────────
+printf "  \033[1;36m[2/5]\033[0m \033[1mfinding support commit...\033[0m"
+
+PHASE_T0="$(now_ms)"
+
+if [[ -n "$EXPLICIT_COMMIT" ]]; then
+  CLEAN_COMMIT="$EXPLICIT_COMMIT"
+  LATEST_SUPPORT="(explicit --commit)"
+  log_phase "REPLAY" "git:find-support-commits" "OK" "$(( $(now_ms) - PHASE_T0 ))" "found=0 latest=(explicit) clean=$CLEAN_COMMIT"
+  printf "  \033[0;32m✓\033[0m  using explicit commit: ${CLEAN_COMMIT}\n"
+else
+  SUPPORT_COMMITS=$(TERM=xterm-256color ssh "$SSH_HOST" "
+    cd '$REMOTE_PROJECT_PATH' && \
+    git log --oneline | grep 'Support Commit' | head -5
+  " 2>/dev/null || true)
+
+  if [[ -z "$SUPPORT_COMMITS" ]]; then
+    printf "\n"
+    log_phase "REPLAY" "git:find-support-commits" "FAIL" "$(( $(now_ms) - PHASE_T0 ))" "found=0"
+    echo ""
+    echo -e "  ${RED}No Support Commits found in git history.${NC}"
+    echo ""
+    echo "  Available recent commits:"
+    TERM=xterm-256color ssh "$SSH_HOST" "cd '$REMOTE_PROJECT_PATH' && git log --oneline | head -10" 2>/dev/null || true
+    echo ""
+    echo "  Use --commit <sha> to specify a commit manually."
+    exit 1
+  fi
+
+  SUPPORT_COUNT=$(echo "$SUPPORT_COMMITS" | wc -l | tr -d ' ')
+  LATEST_SUPPORT=$(echo "$SUPPORT_COMMITS" | head -1 | awk '{print $1}')
+
+  CLEAN_COMMIT=$(TERM=xterm-256color ssh "$SSH_HOST" "
+    cd '$REMOTE_PROJECT_PATH' && \
+    git rev-parse ${LATEST_SUPPORT}^ 2>/dev/null
+  " 2>/dev/null || true)
+
+  if [[ -z "$CLEAN_COMMIT" ]]; then
+    printf "\n"
+    log_phase "REPLAY" "git:find-support-commits" "FAIL" "$(( $(now_ms) - PHASE_T0 ))" "could not resolve parent of $LATEST_SUPPORT"
+    fail "Could not resolve clean state commit (parent of $LATEST_SUPPORT)"
+  fi
+
+  log_phase "REPLAY" "git:find-support-commits" "OK" "$(( $(now_ms) - PHASE_T0 ))" "found=$SUPPORT_COUNT latest=$LATEST_SUPPORT"
+  printf "  \033[0;32m✓\033[0m  support=%s  clean=%s\n" "$LATEST_SUPPORT" "${CLEAN_COMMIT:0:8}"
+fi
+
+# ── [3/5] Checkout clean state on remote + rsync ──────────────────────────────
+printf "  \033[1;36m[3/5]\033[0m \033[1mchecking out clean state...\033[0m"
+
+PHASE_T0="$(now_ms)"
+CHECKOUT_OUT=$(TERM=xterm-256color ssh "$SSH_HOST" "
+  cd '$REMOTE_PROJECT_PATH' && \
+  git stash 2>/dev/null || true && \
+  git checkout -b 'rkt-replay-$THREAD_ID' '$CLEAN_COMMIT' 2>&1 | tail -3
+" 2>&1)
+
+if echo "$CHECKOUT_OUT" | grep -qi "error\|fatal"; then
+  printf "\n"
+  log_phase "REPLAY" "git:checkout-clean" "FAIL" "$(( $(now_ms) - PHASE_T0 ))" "commit=$CLEAN_COMMIT"
+  echo ""
+  echo "$CHECKOUT_OUT"
+  fail "Could not checkout clean state at $CLEAN_COMMIT"
+fi
+log_phase "REPLAY" "git:checkout-clean" "OK" "$(( $(now_ms) - PHASE_T0 ))" "commit=${CLEAN_COMMIT:0:8}"
+printf "  \033[0;32m✓\033[0m  remote at clean state\n"
+
+# rsync clean state to local
+printf "  \033[1;36m[3/5]\033[0m \033[1mrsyncing clean state...\033[0m"
+
+mkdir -p "$LOCAL_TMP"
+
+PHASE_T0="$(now_ms)"
+rsync -az --quiet \
+  --exclude 'node_modules' --exclude '.next' --exclude '.git' \
+  --exclude 'dist' --exclude '.turbo' --exclude '*.log' \
+  "$SSH_HOST:$REMOTE_PROJECT_PATH/" "$LOCAL_TMP/" 2>/dev/null
+
+RSYNC_MS="$(( $(now_ms) - PHASE_T0 ))"
+
+if [[ -z "$(ls -A "$LOCAL_TMP" 2>/dev/null)" ]]; then
+  log_phase "REPLAY" "rsync:remote→local" "FAIL" "$RSYNC_MS"
+  fail "rsync failed — $LOCAL_TMP is empty"
+fi
+
+FILE_COUNT="$(count_files "$LOCAL_TMP")"
+log_phase "REPLAY" "rsync:remote→local" "OK" "$RSYNC_MS" "files=$FILE_COUNT"
+printf "  \033[0;32m✓\033[0m  files=%s → %s\n" "$FILE_COUNT" "$LOCAL_TMP"
+
+# ── Save clean snapshot BEFORE engine runs ────────────────────────────────────
+rm -rf "$CLEAN_SNAPSHOT"
+cp -r "$LOCAL_TMP" "$CLEAN_SNAPSHOT"
+
+# ── [4/5] Run engine ──────────────────────────────────────────────────────────
+echo ""
+ENGINE_T0="$(now_ms)"
+
+"$VENV_PYTHON" "$ENGINE_DIR/diagnose_output.py" \
+  --repo-path    "$LOCAL_TMP" \
+  --hint         "$HINT" \
+  --thread       "$THREAD_ID" \
+  --project-name "$PROJECT_FOLDER" \
+  --out-file     "$RESULT_FILE"
+
+PYTHON_EXIT=$?
+ENGINE_MS="$(( $(now_ms) - ENGINE_T0 ))"
+
+# Parse result
+FIXES_APPLIED="False"
+FILES_CHANGED=0
+ENGINE_FINDINGS=0
+ENGINE_CONFIDENCE="?"
+ENGINE_MODE="?"
+
+if [[ -f "$RESULT_FILE" ]]; then
+  FIXES_APPLIED=$("$VENV_PYTHON" -c \
+    "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('fixes_applied',False))" \
+    "$RESULT_FILE" 2>/dev/null || echo "False")
+  FILES_CHANGED=$("$VENV_PYTHON" -c \
+    "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('files_changed',0))" \
+    "$RESULT_FILE" 2>/dev/null || echo "0")
+  ENGINE_FINDINGS=$("$VENV_PYTHON" -c \
+    "import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get('findings',[])))" \
+    "$RESULT_FILE" 2>/dev/null || echo "0")
+  ENGINE_CONFIDENCE=$("$VENV_PYTHON" -c \
+    "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('overall_confidence','?'))" \
+    "$RESULT_FILE" 2>/dev/null || echo "?")
+  ENGINE_MODE=$("$VENV_PYTHON" -c \
+    "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('fix_mode','?'))" \
+    "$RESULT_FILE" 2>/dev/null || echo "?")
+fi
+
+log_phase "REPLAY" "engine:diagnosis" "OK" "$ENGINE_MS" \
+  "findings=$ENGINE_FINDINGS confidence=$ENGINE_CONFIDENCE fix_mode=$ENGINE_MODE"
+log_phase "REPLAY" "engine:fix" "OK" "0" "files_changed=$FILES_CHANGED"
+
+# ── [5/5] Diff: what engine changed ──────────────────────────────────────────
+echo ""
+echo -e "  \033[1m════════════════════════════════════════════════\033[0m"
+echo -e "  \033[1mWHAT THE ENGINE CHANGED\033[0m"
+echo -e "  \033[1m════════════════════════════════════════════════\033[0m"
+
+DIFF_T0="$(now_ms)"
+ENGINE_FILES_CHANGED=""
+
+if [[ "$FIXES_APPLIED" == "True" ]]; then
+  # Which files differ?
+  ENGINE_FILES_CHANGED=$(diff -rq \
+    --exclude="*.tmp" \
+    --exclude=".rkt_*" \
+    --exclude=".rkt_result.json" \
+    --exclude="*.rkt_backup" \
+    "$CLEAN_SNAPSHOT" \
+    "$LOCAL_TMP" \
+    2>/dev/null \
+    | grep "^Files" \
+    | sed "s|Files $CLEAN_SNAPSHOT/||; s| and $LOCAL_TMP/.*||" \
+    | head -20)
+
+  if [[ -n "$ENGINE_FILES_CHANGED" ]]; then
+    echo ""
+    echo "$ENGINE_FILES_CHANGED" | while read -r f; do
+      echo -e "  ${GREEN}M${NC}  $f"
+    done
+    echo ""
+    echo "  DETAILED DIFF:"
+    echo ""
+    diff -ru \
+      --exclude="*.tmp" \
+      --exclude=".rkt_*" \
+      --exclude=".rkt_result.json" \
+      --exclude="*.rkt_backup" \
+      "$CLEAN_SNAPSHOT" \
+      "$LOCAL_TMP" \
+      2>/dev/null \
+      | head -120
+  else
+    echo ""
+    echo -e "  ${YELLOW}Engine applied fix but no file differences detected.${NC}"
+    echo ""
+  fi
+else
+  echo ""
+  echo -e "  ${YELLOW}Engine found no issues to fix at clean state.${NC}"
+  if [[ "$ENGINE_FINDINGS" -gt 0 ]]; then
+    echo -e "  (Findings detected but not auto-fixed — confidence too low or MANUAL mode)"
+  fi
+  echo ""
+fi
+
+DIFF_MS="$(( $(now_ms) - DIFF_T0 ))"
+
+# ── What the engineer actually did ───────────────────────────────────────────
+echo ""
+echo -e "  \033[1m════════════════════════════════════════════════\033[0m"
+echo -e "  \033[1mWHAT THE ENGINEER ACTUALLY DID\033[0m"
+echo -e "  \033[1m════════════════════════════════════════════════\033[0m"
+echo ""
+
+ENGINEER_FILES_CHANGED=""
+ENGINEER_FILE_COUNT=0
+
+if [[ "$LATEST_SUPPORT" != "(explicit --commit)" ]]; then
+  ENGINEER_SHOW=$(TERM=xterm-256color ssh "$SSH_HOST" "
+    cd '$REMOTE_PROJECT_PATH' && \
+    git show $LATEST_SUPPORT --stat 2>/dev/null && \
+    echo '' && \
+    git diff ${LATEST_SUPPORT}^ $LATEST_SUPPORT -- \
+      \$(git diff --name-only ${LATEST_SUPPORT}^ $LATEST_SUPPORT | head -5) \
+      2>/dev/null
+  " 2>/dev/null | head -120)
+
+  echo "$ENGINEER_SHOW"
+
+  ENGINEER_FILES_CHANGED=$(TERM=xterm-256color ssh "$SSH_HOST" "
+    cd '$REMOTE_PROJECT_PATH' && \
+    git diff --name-only ${LATEST_SUPPORT}^ $LATEST_SUPPORT 2>/dev/null | head -20
+  " 2>/dev/null || true)
+
+  ENGINEER_FILE_COUNT=$(echo "$ENGINEER_FILES_CHANGED" | grep -c '.' 2>/dev/null || echo 0)
+else
+  echo -e "  ${YELLOW}(--commit flag used — no Support Commit to compare against)${NC}"
+  echo ""
+fi
+
+# ── Match calculation ─────────────────────────────────────────────────────────
+MATCH="NO"
+MATCH_DETAIL=""
+
+if [[ -n "$ENGINE_FILES_CHANGED" && -n "$ENGINEER_FILES_CHANGED" ]]; then
+  # Count overlapping files
+  OVERLAP=0
+  while IFS= read -r ef; do
+    if echo "$ENGINEER_FILES_CHANGED" | grep -qF "$ef"; then
+      OVERLAP=$((OVERLAP + 1))
+    fi
+  done <<< "$ENGINE_FILES_CHANGED"
+
+  ENGINE_COUNT=$(echo "$ENGINE_FILES_CHANGED" | grep -c '.' 2>/dev/null || echo 0)
+
+  if [[ "$OVERLAP" -ge "$ENGINE_COUNT" && "$ENGINE_COUNT" -gt 0 ]]; then
+    MATCH="YES"
+    MATCH_DETAIL="all $OVERLAP file(s) overlap"
+  elif [[ "$OVERLAP" -gt 0 ]]; then
+    MATCH="PARTIAL"
+    MATCH_DETAIL="$OVERLAP of $ENGINE_COUNT engine file(s) overlap"
+  else
+    MATCH="NO"
+    MATCH_DETAIL="no file overlap"
+  fi
+elif [[ "$FIXES_APPLIED" != "True" && "$LATEST_SUPPORT" != "(explicit --commit)" ]]; then
+  MATCH="NO"
+  MATCH_DETAIL="engine made no changes"
+fi
+
+log_phase "REPLAY" "diff:engine-vs-engineer" "OK" "$DIFF_MS" \
+  "match=$MATCH ($MATCH_DETAIL)"
+
+# ── Restore remote ────────────────────────────────────────────────────────────
+echo ""
+printf "  Restoring remote git state..."
+
+PHASE_T0="$(now_ms)"
+_restore_remote
+_REMOTE_RESTORE_DONE="true"
+RESTORE_MS="$(( $(now_ms) - PHASE_T0 ))"
+
+log_phase "REPLAY" "git:restore-remote" "OK" "$RESTORE_MS"
+printf "  \033[0;32m✓\033[0m\n"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo ""
+echo -e "  \033[1m════════════════════════════════════════════════════\033[0m"
+echo -e "  \033[1mREPLAY SUMMARY  thread=${THREAD_ID}\033[0m"
+echo -e "  \033[1m════════════════════════════════════════════════════\033[0m"
+echo ""
+printf "  %-18s %s\n" "Project:"         "$PROJECT_FOLDER"
+printf "  %-18s %s\n" "Clean commit:"    "${CLEAN_COMMIT:0:12}"
+printf "  %-18s %s\n" "Support commit:"  "$LATEST_SUPPORT"
+echo ""
+printf "  %-18s %s\n" "Engine found:"    "$ENGINE_FINDINGS finding(s)"
+printf "  %-18s %s\n" "Engine fixed:"    "$FILES_CHANGED file(s) changed"
+printf "  %-18s %s\n" "Engineer fixed:"  "$ENGINEER_FILE_COUNT file(s) changed"
+echo ""
+
+if [[ -n "$ENGINE_FILES_CHANGED" ]]; then
+  echo "  Files engine changed:"
+  echo "$ENGINE_FILES_CHANGED" | while read -r f; do
+    echo "    $f"
+  done
+fi
+if [[ -n "$ENGINEER_FILES_CHANGED" && "$LATEST_SUPPORT" != "(explicit --commit)" ]]; then
+  echo "  Files engineer changed:"
+  echo "$ENGINEER_FILES_CHANGED" | while read -r f; do
+    echo "    $f"
+  done
+fi
+
+echo ""
+case "$MATCH" in
+  YES)     echo -e "  Match: ${GREEN}YES${NC}  ($MATCH_DETAIL)" ;;
+  PARTIAL) echo -e "  Match: ${YELLOW}PARTIAL${NC}  ($MATCH_DETAIL)" ;;
+  NO)      echo -e "  Match: ${RED}NO${NC}  ($MATCH_DETAIL)" ;;
+esac
+
+echo ""
+printf "  %-18s %s\n" "Engine diff:" "$LOCAL_TMP"
+printf "  %-18s %s\n" "Clean snapshot:" "$CLEAN_SNAPSHOT"
+echo ""
+echo -e "  \033[1m════════════════════════════════════════════════════\033[0m"
+
+# ── Open Cursor ───────────────────────────────────────────────────────────────
+echo ""
+printf "  \033[1mOpen in Cursor?\033[0m  [Enter to open · Ctrl+C to skip] "
+read -r _CURSOR_REPLY 2>/dev/null || true
+cursor "$LOCAL_TMP" &>/dev/null &
+
+echo ""
+echo "  To see diff in terminal:"
+echo -e "    ${CYAN}diff -ru $CLEAN_SNAPSHOT $LOCAL_TMP${NC}"
+echo ""
+
+# ── Cleanup prompt ────────────────────────────────────────────────────────────
+rm -f "$RESULT_FILE"
+
+if [[ "$KEEP" == "true" ]]; then
+  echo "  --keep: local files retained."
+else
+  echo ""
+  printf "  Clean up local files? [y/N]: "
+  read -r _CLEANUP_REPLY 2>/dev/null || true
+  if [[ "$_CLEANUP_REPLY" =~ ^[Yy]$ ]]; then
+    rm -rf "$LOCAL_TMP" "$CLEAN_SNAPSHOT"
+    echo "  Removed."
+  fi
+fi
+
+log_line "Log saved to: $TRACE_LOG_PATH"
+echo ""
+exit "$PYTHON_EXIT"
