@@ -1,14 +1,17 @@
 """
-claude_agent.py — Two-path fix agent for rkt-diagnose.
+claude_agent.py — Three-path fix agent for rkt-diagnose.
 
 PATH A — brain.db has a verified unified diff for this pattern:
     Apply it directly with string matching. Zero tokens, <1ms.
 
-PATH B — No known diff or diff not applicable:
-    Call Claude API (claude-sonnet-4-6) with surgical slicer context.
-    Claude returns exact JSON changes. Engine applies them.
+PATH B — Claude Code CLI (primary AI path):
+    Full cursor rules, real file access, runs tsc --noEmit itself.
+    Capped at $0.05/ticket. Falls through on failure.
 
-Both paths write atomically and fall through gracefully on failure.
+PATH C — Raw Claude API (fallback):
+    7-line slicer context, returns JSON changes applied by engine.
+
+All paths write atomically and fall through gracefully on failure.
 """
 
 from __future__ import annotations
@@ -103,7 +106,31 @@ class ClaudeAgent:
                     return result
                 # fall through to PATH B
 
-        # PATH B — Claude API
+        # PATH B — Claude Code CLI (full cursor rules, real file access, runs tsc itself)
+        try:
+            from claude_code_agent import run_claude_code_fix
+            cc = run_claude_code_fix(
+                findings=findings,
+                repo_path=repo_path,
+                db_match=db_match,
+                hint=hint,
+                shadow=shadow,
+                timeout=120,
+            )
+            if cc["success"]:
+                return AgentResult(
+                    success=True,
+                    changes_applied=cc["changes_applied"],
+                    root_cause=findings[0].get("issue") or findings[0].get("message", "") if findings else "",
+                    confidence="HIGH",
+                    tokens_used=cc["tokens_used"],
+                    error="",
+                    path_used="claude_code_cli",
+                )
+        except Exception:
+            pass  # fall through to PATH C
+
+        # PATH C — Raw Claude API (fallback)
         return self._claude_api_fix(findings, repo_path, db_match, hint, shadow=shadow)
 
     # ── PATH A helpers ────────────────────────────────────────────────────────
