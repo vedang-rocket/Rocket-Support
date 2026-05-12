@@ -34,6 +34,12 @@ kb/kb_index.pkl
 .rocket-support/
 .claude/settings.local.json
 
+# Environment files (secrets — never commit)
+.env
+.env.local
+.env.*
+!.env.example
+
 # Logs
 logs/
 *.log

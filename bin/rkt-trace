@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# Usage: rkt-trace <threadId> [hint]
+# Runs full diagnosis with deep instrumentation.
+# Every tool call logged with timing and output.
+
+set -u
+
+THREAD_ID=""
+HINT=""
+
+for arg in "$@"; do
+  if [[ -z "$THREAD_ID" ]]; then
+    THREAD_ID="$arg"
+  elif [[ -z "$HINT" ]]; then
+    HINT="$arg"
+  fi
+done
+
+SSH_HOST="support-vedang-patel"
+REMOTE_APP_DIR="/home/ubuntu/app"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENGINE_DIR="$SCRIPT_DIR/../engine"
+VENV_PYTHON="$ENGINE_DIR/.venv/bin/python"
+LOCAL_TMP="/tmp/rkt-trace-$THREAD_ID"
+RESULT_FILE="$LOCAL_TMP/.rkt_result.json"
+
+fail() { echo "FAIL $1" >&2; exit 1; }
+
+if [[ -z "$THREAD_ID" ]]; then
+  echo "Usage: rkt-trace <threadId> [hint]"
+  exit 1
+fi
+
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  fail "Engine venv not found: $VENV_PYTHON"
+fi
+
+now_ms() {
+  perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000'
+}
+
+elapsed_stamp() {
+  local now elapsed minutes seconds millis
+  now="$(now_ms)"
+  elapsed=$((now - TRACE_START_MS))
+  minutes=$((elapsed / 60000))
+  seconds=$(((elapsed % 60000) / 1000))
+  millis=$((elapsed % 1000))
+  printf "%02d:%02d.%03d" "$minutes" "$seconds" "$millis"
+}
+
+log_line() {
+  local line="$1"
+  printf "%s\n" "$line"
+  printf "%s\n" "$line" >> "$TRACE_LOG_PATH"
+}
+
+log_phase() {
+  local phase="$1"
+  local tool="$2"
+  local status="$3"
+  local ms="$4"
+  local detail="${5:-}"
+  local line
+  line=$(printf "[%s] %s %s %s %5sms" "$(elapsed_stamp)" "$phase" "$tool" "$status" "$ms")
+  if [[ -n "$detail" ]]; then
+    line="$line   $detail"
+  fi
+  log_line "$line"
+}
+
+count_files() {
+  "$VENV_PYTHON" - "$1" <<'PY'
+import os
+import sys
+
+root = sys.argv[1]
+count = 0
+for _dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in {"node_modules", ".next", ".git", "dist", ".turbo"}]
+    count += len(filenames)
+print(count)
+PY
+}
+
+TRACE_START_MS="$(now_ms)"
+TRACE_DIR="$HOME/.rocket-support/traces"
+mkdir -p "$TRACE_DIR"
+TRACE_STAMP="$(date +%Y%m%dT%H%M%S)"
+TRACE_SAFE_THREAD="$(printf "%s" "$THREAD_ID" | tr -c 'A-Za-z0-9_.-' '_')"
+TRACE_LOG_PATH="$TRACE_DIR/${TRACE_SAFE_THREAD}_${TRACE_STAMP}.log"
+TRACE_WRAP_DIR="$(mktemp -d /tmp/rkt-trace-wrap.XXXXXX)"
+
+cleanup() {
+  rm -rf "$TRACE_WRAP_DIR"
+}
+trap cleanup EXIT
+
+log_line "[$(elapsed_stamp)] START rkt-trace thread=$THREAD_ID"
+
+for TOOL in rg ast-grep tsc rsync npx; do
+  REAL_TOOL="$(command -v "$TOOL" 2>/dev/null || true)"
+  if [[ -z "$REAL_TOOL" ]]; then
+    continue
+  fi
+  cat > "$TRACE_WRAP_DIR/$TOOL" <<WRAPPER
+#!/usr/bin/env bash
+now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f\\n", time() * 1000'; }
+_T0=\$(now_ms)
+"$REAL_TOOL" "\$@"
+_EXIT=\$?
+_T1=\$(now_ms)
+_MS=\$((_T1 - _T0))
+printf "[SUBPROC] tool=$TOOL exit=%s ms=%s args=%s\\n" "\$_EXIT" "\$_MS" "\$*" >> "$TRACE_LOG_PATH" 2>/dev/null
+exit "\$_EXIT"
+WRAPPER
+  chmod +x "$TRACE_WRAP_DIR/$TOOL"
+done
+
+export PATH="$TRACE_WRAP_DIR:$PATH"
+export RKT_TRACE="$THREAD_ID"
+export RKT_TRACE_LOG="$TRACE_LOG_PATH"
+export RKT_TRACE_SUPPRESS_START=1
+export PYTHONUNBUFFERED=1
+
+PHASE_T0="$(now_ms)"
+TERM=xterm-256color ssh "$SSH_HOST" "echo 'y' | rocket clean 2>&1" >/dev/null 2>&1 || true
+log_phase "PHASE0" "hook:rocket-clean" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+
+PHASE_T0="$(now_ms)"
+INIT_OUTPUT=$(TERM=xterm-256color ssh "$SSH_HOST" "printf '1\ny\n' | rocket init $THREAD_ID 2>&1")
+if ! echo "$INIT_OUTPUT" | /usr/bin/grep -q '"code":"OK"'; then
+  log_phase "PHASE0" "hook:rocket-init" "FAIL" "$(( $(now_ms) - PHASE_T0 ))"
+  fail "rocket init failed — check thread ID: $THREAD_ID"
+fi
+log_phase "PHASE0" "hook:rocket-init" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+
+PHASE_T0="$(now_ms)"
+PROJECT_FOLDER=$(TERM=xterm-256color ssh "$SSH_HOST" "ls -t $REMOTE_APP_DIR 2>/dev/null | /usr/bin/head -1")
+if [[ -z "$PROJECT_FOLDER" ]]; then
+  log_phase "PHASE0" "hook:detect-project" "FAIL" "$(( $(now_ms) - PHASE_T0 ))"
+  fail "Could not detect project folder in ~/app"
+fi
+REMOTE_PROJECT_PATH="$REMOTE_APP_DIR/$PROJECT_FOLDER"
+log_phase "PHASE0" "hook:detect-project" "OK" "$(( $(now_ms) - PHASE_T0 ))" "project=$PROJECT_FOLDER"
+
+PHASE_T0="$(now_ms)"
+"$SCRIPT_DIR/rkt-rules-add" >/dev/null 2>&1 || true
+log_phase "PHASE0" "hook:chain-walker-check.sh" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+
+mkdir -p "$LOCAL_TMP"
+
+PHASE_T0="$(now_ms)"
+rsync -az --quiet \
+  --exclude 'node_modules' --exclude '.next' --exclude '.git' \
+  --exclude 'dist' --exclude '.turbo' --exclude '*.log' \
+  "$SSH_HOST:$REMOTE_PROJECT_PATH/" "$LOCAL_TMP/" 2>/dev/null
+RSYNC_MS="$(( $(now_ms) - PHASE_T0 ))"
+
+if [[ -z "$(ls -A "$LOCAL_TMP" 2>/dev/null)" ]]; then
+  log_phase "PHASE1" "rsync:remote->local" "FAIL" "$RSYNC_MS"
+  fail "rsync failed — $LOCAL_TMP is empty"
+fi
+log_phase "PHASE1" "rsync:remote->local" "OK" "$RSYNC_MS" "files=$(count_files "$LOCAL_TMP")"
+
+"$VENV_PYTHON" "$ENGINE_DIR/diagnose_output.py" \
+  --repo-path    "$LOCAL_TMP" \
+  --hint         "$HINT" \
+  --thread       "$THREAD_ID" \
+  --project-name "$PROJECT_FOLDER" \
+  --out-file     "$RESULT_FILE"
+
+PYTHON_EXIT=$?
+
+if [[ "$PYTHON_EXIT" -eq 0 && -f "$RESULT_FILE" ]]; then
+  FIXES_APPLIED=$("$VENV_PYTHON" -c \
+    "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('fixes_applied',False))" \
+    "$RESULT_FILE" 2>/dev/null || echo "False")
+
+  if [[ "$FIXES_APPLIED" == "True" ]]; then
+    rm -f "$RESULT_FILE"
+    BEFORE_FILES="$(count_files "$LOCAL_TMP")"
+    PHASE_T0="$(now_ms)"
+    rsync -az --quiet \
+      --exclude 'node_modules' --exclude '.next' --exclude '.git' \
+      --exclude 'dist' --exclude '.turbo' --exclude '*.log' \
+      --exclude '.rkt_result.json' --exclude '*.rkt_backup' \
+      "$LOCAL_TMP/" "$SSH_HOST:$REMOTE_PROJECT_PATH/" 2>/dev/null
+    log_phase "PHASE11" "rsync:local->remote" "OK" "$(( $(now_ms) - PHASE_T0 ))" "files=$BEFORE_FILES"
+  else
+    log_phase "PHASE11" "rsync:local->remote" "--" "0" "files=0"
+  fi
+fi
+
+PHASE_T0="$(now_ms)"
+TERM=xterm-256color ssh "$SSH_HOST" \
+  "cd \"$REMOTE_PROJECT_PATH\" && npm install --prefer-offline --quiet 2>&1" \
+  >/dev/null 2>&1 || true
+log_phase "PHASE11" "npm:install" "OK" "$(( $(now_ms) - PHASE_T0 ))"
+
+rm -f "$RESULT_FILE"
+log_line "Log saved to: $TRACE_LOG_PATH"
+exit "$PYTHON_EXIT"

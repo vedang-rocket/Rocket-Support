@@ -25,6 +25,7 @@ import chain_walker as cw
 import rkt_engine
 from context_filter import filter_findings
 from dedup import deduplicate
+from finding_resolver import resolve
 
 GREEN = "\033[0;32m"
 YELLOW = "\033[0;33m"
@@ -33,13 +34,14 @@ CYAN = "\033[0;36m"
 NC = "\033[0m"
 
 
-def _fingerprint_set(findings: List[Dict[str, Any]]) -> Set[str]:
-    """Build a set of (source:path:rule_tail) keys for dedup against original report."""
+def _fingerprint_set(findings: List[Dict[str, Any]], workspace_path: str) -> Set[str]:
+    """Build a set of (source:rel_path:rule_tail) keys for dedup against original report."""
     result = set()
     for entry in findings:
         src = entry.get("source", "")
         f = entry.get("finding", {})
-        path = f.get("path") or f.get("broken_at") or f.get("file") or ""
+        r = resolve(entry, workspace_path)
+        path = r.rel_path or ""
         rule_tail = (f.get("chain") or f.get("check_id") or "").split(".")[-1].lower()
         result.add(f"{src}:{path}:{rule_tail}")
     return result
@@ -78,26 +80,28 @@ def run(
     # Re-run chain_walker, filter to changed files only
     cw_entries: List[Dict[str, Any]] = []
     for f in cw.walk(workspace_path):
-        if f.get("broken_at") in changed_set:
-            cw_entries.append({
-                "source": "chain_walker",
-                "finding": f,
-                "fix_mode": "GUIDED",
-                "confidence": 0.75,
-            })
+        entry = {
+            "source": "chain_walker",
+            "finding": f,
+            "fix_mode": "GUIDED",
+            "confidence": 0.75,
+        }
+        if (resolve(entry, workspace_path).rel_path or "") in changed_set:
+            cw_entries.append(entry)
 
     # Re-run semgrep scoped to changed files
     semgrep_entries: List[Dict[str, Any]] = []
     if rel_files:
         sg = rkt_engine.run_semgrep(workspace_path, autofix=False)
         for f in sg.get("findings", []):
-            if f.get("path") in changed_set:
-                semgrep_entries.append({
-                    "source": "semgrep",
-                    "finding": f,
-                    "fix_mode": "GUIDED",
-                    "confidence": 0.75,
-                })
+            entry = {
+                "source": "semgrep",
+                "finding": f,
+                "fix_mode": "GUIDED",
+                "confidence": 0.75,
+            }
+            if (resolve(entry, workspace_path).rel_path or "") in changed_set:
+                semgrep_entries.append(entry)
 
     all_new = cw_entries + semgrep_entries
 
@@ -106,9 +110,9 @@ def run(
     deduped = deduplicate(filtered["active"])
 
     # Remove findings that were already in the original report
-    original_fp = _fingerprint_set(original_findings or [])
+    original_fp = _fingerprint_set(original_findings or [], workspace_path)
     if original_fp:
-        delta = [e for e in deduped if not (_fingerprint_set([e]) & original_fp)]
+        delta = [e for e in deduped if not (_fingerprint_set([e], workspace_path) & original_fp)]
     else:
         delta = deduped
 
@@ -120,7 +124,7 @@ def run(
     }
 
 
-def format_delta(result: Dict[str, Any]) -> str:
+def format_delta(result: Dict[str, Any], workspace_path: str = "") -> str:
     delta = result["delta_findings"]
     files = result["files_scanned"]
     ms = result["scan_time_ms"]
@@ -140,14 +144,15 @@ def format_delta(result: Dict[str, Any]) -> str:
             evidence = entry.get("evidence", [src])
             ev_str = "+".join(evidence)
 
+            r = resolve(entry, workspace_path or os.getcwd())
+            path = r.rel_path or ""
+            line = r.line if r.line is not None else "?"
+
             if src == "chain_walker":
                 msg = f.get("issue", "")
-                path = f.get("broken_at", "")
                 lines.append(f"     [{ev_str}] [{mode}:{conf:.0%}] {path} — {msg}")
             else:
                 rule = (f.get("check_id") or "").split(".")[-1]
-                path = f.get("path", "")
-                line = f.get("start", {}).get("line", "?")
                 lines.append(f"     [{ev_str}] [{mode}:{conf:.0%}] {rule} @ {path}:{line}")
 
         lines.append(f"     → Run {CYAN}rkt-triage{NC} again to fix remaining issues")
@@ -163,4 +168,4 @@ if __name__ == "__main__":
     files = json.loads(sys.argv[2])
     issue = sys.argv[3]
     result = run(ws, files, issue)
-    print(format_delta(result))
+    print(format_delta(result, ws))

@@ -310,3 +310,100 @@ Where rule now lives:
 
 Verified: YES
 ---
+---
+Date: 2026-05-12
+Ticket: 69e1d0ddd486e40014029a88 (loststoriesacademy)
+Category: SUPABASE
+Confidence: HIGH
+
+What Claude did wrong:
+Injected on_auth_user_created trigger into wrong migration file
+(20260420170907_brand_logos_storage.sql — a storage bucket migration).
+Also used EXECUTE PROCEDURE instead of EXECUTE FUNCTION (deprecated in PG11+).
+The trigger should be in its own new migration file.
+
+What it should have done:
+Created a NEW migration file:
+supabase/migrations/<timestamp>_add_user_trigger.sql
+With content:
+  CREATE OR REPLACE FUNCTION public.handle_new_user()
+  RETURNS trigger AS $$
+  BEGIN
+    INSERT INTO public.profiles (id, email)
+    VALUES (new.id, new.email);
+    RETURN new;
+  END;
+  $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+  CREATE OR REPLACE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+Root cause:
+1. Claude received "file: supabase/migrations/20260420170907_brand_logos_storage.sql"
+   as the context file (from schema_checker finding) and injected into it.
+2. schema_checker findings don't specify WHERE to create the fix — only that it's missing.
+3. Claude should CREATE a new migration file, not modify an existing one.
+4. EXECUTE PROCEDURE is deprecated — should be EXECUTE FUNCTION.
+
+Permanent fix needed:
+1. schema_checker findings should have fix_hint: "create new migration file"
+2. Claude prompt for SUPABASE/schema category should say:
+   "For missing triggers/policies: CREATE a new migration file, never modify existing ones"
+3. Add to probe_scanner: detect EXECUTE PROCEDURE → flag as deprecated
+
+Where rule needs to go:
+[ ] claude_agent.py prompt — add SUPABASE-specific rule
+[ ] schema_checker.py — add fix_hint "create new migration" to trigger check
+[ ] brain.db — add verified pattern for trigger creation
+
+Verified: NO — needs implementation
+---
+---
+Date: 2026-05-12
+Ticket: 69e1d0ddd486e40014029a88 (loststoriesacademy)
+Category: AUTH
+Confidence: HIGH
+
+What engine did wrong:
+_MIDDLEWARE_CANONICAL_INLINE replaced entire middleware.ts with generic template.
+Lost: custom injectTokenFromHeader() function
+Lost: admin route protection logic (isAdminLogin checks)
+Lost: project-specific matcher (/admin/:path*)
+Engine wrote generic matcher for all routes instead.
+
+What it should have done:
+Surgical fix — only change the Supabase client initialization.
+Replace: createServerClient(...inline...) 
+With:    import { createClient } from './lib/supabase/server' OR
+         keep createServerClient but fix the pattern
+
+Preserve all other middleware logic unchanged.
+
+Root cause:
+_invoke_claude_manual_fixes() uses Path 2 (no lib helper found).
+Path 2 always replaces entire file with _MIDDLEWARE_CANONICAL_INLINE.
+This destroys any custom logic in the middleware.
+
+Permanent fix needed:
+1. Before using Path 2 (full replacement), check if middleware has
+   custom logic beyond just Supabase client setup.
+   If yes → use Claude API with surgical prompt instead.
+   If no  → safe to use canonical template.
+
+2. Detection heuristic for custom logic:
+   - Has functions defined before middleware()? → custom logic exists
+   - Has route-specific conditions? → custom logic exists
+   - Has custom headers processing? → custom logic exists
+
+3. If custom logic detected → fall through to Claude API path
+   with instruction: "Fix ONLY the Supabase client initialization.
+   Do not change any other logic in this file."
+
+Where rule needs to go:
+[ ] diagnose_output.py _invoke_claude_manual_fixes()
+    Add custom logic detection before Path 2
+[ ] failure_log.md — documented here
+
+Verified: NO — needs implementation
+---

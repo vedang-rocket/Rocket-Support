@@ -63,7 +63,9 @@
       "Bash(sqlite3 ~/.rocket-support/brain.db \"SELECT id, SUBSTR\\(pattern,1,60\\) FROM fixes WHERE pattern LIKE 'Manual fix:%';\")",
       "Bash(sqlite3 ~/.rocket-support/brain.db \"SELECT id, SUBSTR\\(pattern,1,50\\), SUBSTR\\(error_signature,1,50\\) FROM fixes WHERE id IN \\('be38dc53f31131d6','9196750b369166fa'\\);\")",
       "Bash(sqlite3 *)",
-      "Bash(engine/.venv/bin/pip install *)"
+      "Bash(engine/.venv/bin/pip install *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   },
   "enableAllProjectMcpServers": true,

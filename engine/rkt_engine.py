@@ -15,6 +15,7 @@ Output order:
 Every fix path saves results to brain.db.
 """
 
+import tracer as _tracer
 import os
 import sys
 import json
@@ -130,6 +131,17 @@ def run_semgrep(repo_path: str, autofix: bool = False) -> Dict[str, Any]:
         )
         output = result.stdout.strip()
         if not output:
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                return {
+                    "available": True,
+                    "findings": [],
+                    "error": (
+                        f"semgrep exited with code {result.returncode}"
+                        + (f": {stderr}" if stderr else "")
+                    ),
+                    "autofix_applied": autofix,
+                }
             return {"available": True, "findings": [], "autofix_applied": autofix}
 
         data = json.loads(output)
@@ -204,8 +216,15 @@ def semgrep_to_diff(findings: List[Dict], repo_path: str) -> str:
 
 def db_lookup(query: str, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Look up similar fixes via hybrid search (semantic + FTS + RRF), falls back to cosine."""
-    fix_db.init_db()
-    return fix_db.hybrid_lookup(query, category=category)
+    with _tracer.trace("PHASE4", "hybrid_lookup") as trace_token:
+        trace_token.set_input(f"category={category or '-'} query={query[:80]}")
+        fix_db.init_db()
+        match = fix_db.hybrid_lookup(query, category=category)
+        trace_token.set_result(match, f"hits={1 if match else 0}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("brain.db lookup hits", 1 if match else 0)
+        return match
 
 
 # ── File-system checks (supplementing semgrep) ───────────────────────────────
@@ -576,6 +595,7 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
     Returns dict with all findings and the diagnosis output.
     """
     repo_path = os.path.abspath(repo_path)
+    _tracer.init_if_env()
     if not os.path.isdir(repo_path):
         print(ERR(f"Repo path not found: {repo_path}"))
         sys.exit(1)
@@ -598,7 +618,12 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
     # ── Layer 0: Chain walker ─────────────────────────────────────────────────
     print(STEP("Layer 0: chain_walker (structural breaks)"), flush=True)
     t0 = time.perf_counter()
-    cw_findings = chain_walker.walk(repo_path)
+    with _tracer.trace("PHASE2", "chain_walker") as trace_token:
+        cw_findings = chain_walker.walk(repo_path)
+        trace_token.set_result(cw_findings, f"findings={len(cw_findings)}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("chain_walker findings", len(cw_findings))
     elapsed_cw = (time.perf_counter() - t0) * 1000
 
     result["chain_walker"] = cw_findings
@@ -613,7 +638,13 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
     # ── Layer 0b: Schema checker ──────────────────────────────────────────────
     print(STEP("Layer 0b: schema_checker (SQL migration audit)"), flush=True)
     t_sc = time.perf_counter()
-    schema_findings = schema_checker.check(repo_path)
+    with _tracer.trace("PHASE2", "schema_checker") as trace_token:
+        schema_findings = schema_checker.check(repo_path)
+        schema_fail_count = len(schema_checker.failures(schema_findings)) if schema_findings else 0
+        trace_token.set_result(schema_findings, f"findings={schema_fail_count}")
+        logger = _tracer.get_logger()
+        if logger:
+            logger.set_finding("schema_checker findings", schema_fail_count)
     elapsed_sc = (time.perf_counter() - t_sc) * 1000
     result["schema"] = schema_findings
 
@@ -631,14 +662,19 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
                 try:
                     fix_db.save_fix(
                         pattern=f"missing {sf['check']}",
-                        error_sig=sf["check"],
+                        error_signature=sf["check"],
                         category="SCHEMA",
                         fix_diff=sf["fix_hint"],
                         project_type=None,
                         verified=1,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(
+                        WARN(
+                            f"schema_checker: failed to persist finding '{sf.get('check', 'unknown')}': {e}"
+                        ),
+                        flush=True,
+                    )
         else:
             print(OK(f"schema_checker: {elapsed_sc:.1f}ms — all patterns present"), flush=True)
 
@@ -647,11 +683,29 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
     _probe_future = None
     _probe_executor = None
     if not skip_semgrep and _PROBE_AVAILABLE:
+        def _run_probe_scanner_traced(path: str) -> Dict[str, Any]:
+            with _tracer.trace("PHASE2", "probe_scanner") as trace_token:
+                scan_result = _probe_scanner.run_probe_scanner(path)
+                scan_findings = scan_result.get("findings", []) or []
+                trace_token.set_result(scan_findings, f"findings={len(scan_findings)}")
+                logger = _tracer.get_logger()
+                if logger:
+                    logger.set_finding("probe_scanner findings", len(scan_findings))
+                return scan_result
+
         _probe_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        _probe_future = _probe_executor.submit(_probe_scanner.run_probe_scanner, repo_path)
+        _probe_future = _probe_executor.submit(_run_probe_scanner_traced, repo_path)
 
     t1 = time.perf_counter()
-    fingerprint_result = fp.fingerprint(repo_path)
+    with _tracer.trace("PHASE2", "fingerprint") as trace_token:
+        fingerprint_result = fp.fingerprint(repo_path)
+        trace_token.set_result(
+            fingerprint_result,
+            (
+                f"type={fingerprint_result.get('project_type', 'Unknown')} "
+                f"confidence={fingerprint_result.get('confidence', 0):.2f}"
+            ),
+        )
     result["fingerprint"] = fingerprint_result
 
     ptype = fingerprint_result["project_type"]
@@ -695,21 +749,42 @@ def diagnose(repo_path: str, hint: str = "", skip_semgrep: bool = False) -> Dict
                 _probe_executor.shutdown(wait=False)
         elapsed_sg = (time.perf_counter() - t2) * 1000
         _n = len(semgrep_result.get("findings", []))
+        _errors = semgrep_result.get("errors", []) or []
         if _n:
             print(INFO(f"probe_scanner: {elapsed_sg:.0f}ms — {_n} issue(s) found"), flush=True)
             print(format_semgrep_findings(semgrep_result["findings"]), flush=True)
+        elif _errors:
+            _err_msg = "; ".join(str(e) for e in _errors)
+            print(
+                WARN(
+                    f"probe_scanner: {elapsed_sg:.0f}ms — no findings, but {len(_errors)} scanner(s) failed: {_err_msg}"
+                ),
+                flush=True,
+            )
         else:
             print(OK(f"probe_scanner: {elapsed_sg:.0f}ms — no violations"), flush=True)
     else:
-        semgrep_result = run_semgrep(repo_path, autofix=False)
+        with _tracer.trace("PHASE2", "semgrep") as trace_token:
+            semgrep_result = run_semgrep(repo_path, autofix=False)
+            sg_findings = semgrep_result.get("findings", []) or []
+            trace_token.set_result(sg_findings, f"findings={len(sg_findings)}")
         elapsed_sg = (time.perf_counter() - t2) * 1000
         if not semgrep_result.get("available"):
             print(WARN("semgrep not available — skipping (install: pip install semgrep)"), flush=True)
         else:
             _n = len(semgrep_result.get("findings", []))
+            _errors = semgrep_result.get("errors", []) or []
             if _n:
                 print(INFO(f"semgrep: {elapsed_sg:.0f}ms — {_n} issue(s)"), flush=True)
                 print(format_semgrep_findings(semgrep_result["findings"]), flush=True)
+            elif _errors:
+                _err_msg = "; ".join(str(e) for e in _errors)
+                print(
+                    WARN(
+                        f"semgrep: {elapsed_sg:.0f}ms — no findings, but {len(_errors)} scanner(s) failed: {_err_msg}"
+                    ),
+                    flush=True,
+                )
             else:
                 print(OK(f"semgrep: {elapsed_sg:.0f}ms — no violations"), flush=True)
     result["semgrep"] = semgrep_result

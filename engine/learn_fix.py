@@ -67,6 +67,7 @@ def prompt_learn(project: str, thread: str) -> None:
         error_signature=error_sig or f"{project}|{thread}",
         category=category,
         fix_diff=fix_diff,
+        project_type="Unknown",
         verified=1,
     )
     print(f"\n  {GREEN}✓{NC}  Pattern saved: {fix_id[:8]}... [{category}] {pattern[:60]}\n")
