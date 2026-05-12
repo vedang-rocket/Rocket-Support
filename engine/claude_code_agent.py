@@ -48,10 +48,17 @@ def _build_fix_prompt(
 
     _issue_lower = issue.lower()
     _db_category = (db_match or {}).get("category", "") if db_match else ""
+    _db_pattern = (db_match or {}).get("pattern", "").lower() if db_match else ""
     _is_trigger_finding = (
         "trigger" in _issue_lower
         or "on_auth_user_created" in _issue_lower
-        or _db_category in ("SUPABASE", "RLS")
+        or (
+            _db_category in ("SUPABASE", "RLS")
+            and (
+                "trigger" in _db_pattern
+                or "on_auth_user_created" in _db_pattern
+            )
+        )
     )
 
     trigger_rule = ""
