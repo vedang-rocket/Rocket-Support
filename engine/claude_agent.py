@@ -535,8 +535,12 @@ If you are not certain of the exact fix → return:
             abs_path = os.path.join(repo_path, change_rel)
             if not os.path.isfile(abs_path):
                 if (change.get("old") or "").strip() == "":
-                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-                    self._write_atomic(abs_path, (change.get("new") or "") + "\n")
+                    real_repo = os.path.realpath(repo_path)
+                    real_abs = os.path.realpath(os.path.normpath(abs_path))
+                    if not real_abs.startswith(real_repo + os.sep):
+                        continue
+                    os.makedirs(os.path.dirname(real_abs), exist_ok=True)
+                    self._write_atomic(real_abs, (change.get("new") or "") + "\n")
                     changes_applied.append({
                         "file": change_rel,
                         "line": 1,
