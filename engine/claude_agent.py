@@ -438,6 +438,7 @@ RULES — READ CAREFULLY:
 7. Do NOT add comments.
 8. Do NOT change indentation of surrounding lines.
 9. The >>> prefix in the context above is a visual marker only. Do NOT include >>> in the "old" field. Copy the exact line content without any prefix.
+10. For a missing on_auth_user_created trigger: create a NEW file supabase/migrations/<YYYYMMDDHHMMSS>_add_user_trigger.sql — never modify existing migration files. Set "old" to "" (empty string) and "new" to the full file content. Use EXECUTE FUNCTION not EXECUTE PROCEDURE.
 
 JSON FORMAT:
 {{
@@ -533,6 +534,15 @@ If you are not certain of the exact fix → return:
                 continue
             abs_path = os.path.join(repo_path, change_rel)
             if not os.path.isfile(abs_path):
+                if (change.get("old") or "").strip() == "":
+                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                    self._write_atomic(abs_path, (change.get("new") or "") + "\n")
+                    changes_applied.append({
+                        "file": change_rel,
+                        "line": 1,
+                        "old": "",
+                        "new": (change.get("new") or "")[:80],
+                    })
                 continue
             if not self._verify_change_safe(abs_path, change):
                 continue
