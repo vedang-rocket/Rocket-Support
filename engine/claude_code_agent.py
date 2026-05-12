@@ -46,6 +46,41 @@ def _build_fix_prompt(
         if db_match.get("fix_diff"):
             db_context += f"\nSimilar fix applied before:\n{db_match['fix_diff'][:200]}"
 
+    _issue_lower = issue.lower()
+    _db_category = (db_match or {}).get("category", "") if db_match else ""
+    _is_trigger_finding = (
+        "trigger" in _issue_lower
+        or "on_auth_user_created" in _issue_lower
+        or _db_category in ("SUPABASE", "RLS")
+    )
+
+    trigger_rule = ""
+    if _is_trigger_finding:
+        from datetime import datetime as _dt
+        _ts = _dt.now().strftime("%Y%m%d%H%M%S")
+        trigger_rule = f"""
+
+IMPORTANT — SQL TRIGGER RULE:
+If the fix requires creating a trigger:
+1. Create a NEW migration file: supabase/migrations/{_ts}_add_user_trigger.sql
+   (use exactly this timestamp: {_ts})
+2. NEVER modify existing migration files
+3. Use EXECUTE FUNCTION not EXECUTE PROCEDURE (PostgreSQL 11+)
+4. The new file must contain both the function AND the trigger:
+
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email)
+  VALUES (new.id, new.email);
+  RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE TRIGGER on_auth_user_created
+AFTER INSERT ON auth.users
+FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();"""
+
     return f"""Fix this bug in {rel_file}.
 
 TICKET: {hint or "(no hint)"}
@@ -60,7 +95,7 @@ INSTRUCTIONS:
 4. After fixing, run: npx tsc --noEmit
 5. If tsc fails, fix the TypeScript errors
 
-Read AGENTS.md in the project root for all hard rules. This is a Rocket.new project."""
+Read AGENTS.md in the project root for all hard rules. This is a Rocket.new project.""" + trigger_rule
 
 
 def run_claude_code_fix(
