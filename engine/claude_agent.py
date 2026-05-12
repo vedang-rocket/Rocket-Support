@@ -434,11 +434,6 @@ CONTEXT (function containing the broken line, >>> marks the problem):
 KNOWN PATTERN FROM DATABASE:
 {db_section or "No exact match — use the issue description to determine fix."}
 
-PLANNING STEP — required before JSON output:
-State in exactly one sentence what change you will make.
-Format: "I will change [old content] to [new content] in [file] at line [N]."
-If you cannot state this precisely → return empty changes array.
-
 RULES — READ CAREFULLY:
 1. Return ONLY valid JSON. No markdown. No backticks. No explanation.
 2. The "old" field must be the EXACT content of the broken line (copy it exactly from context above).

@@ -144,7 +144,7 @@ def run_claude_code_fix(
         "--output-format", "json",
         "--dangerously-skip-permissions",
         "--model", "claude-sonnet-4-6",
-        "--max-budget-usd", "0.05",
+        "--max-budget-usd", "0.50",
         "--add-dir", RULES_DIR,
         "--add-dir", repo_path,
         "--allowedTools", "Edit,Write,Read,Bash(npx tsc --noEmit),Bash(cat *),Bash(ls *)",
@@ -171,7 +171,8 @@ def run_claude_code_fix(
 
         raw = result.stdout.strip()
 
-        if result.returncode != 0:
+        # Claude Code exits 1 when is_error=true in JSON output — parse first, then decide
+        if result.returncode != 0 and not raw:
             return {
                 "success": False,
                 "error": f"Claude Code exited {result.returncode}: {result.stderr[:200]}",
@@ -184,6 +185,15 @@ def run_claude_code_fix(
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": f"Claude Code exited {result.returncode}: {(result.stderr or raw)[:200]}",
+                    "changes_applied": [],
+                    "tokens_used": 0,
+                    "cost_usd": 0.0,
+                    "elapsed_ms": elapsed_ms,
+                }
             data = {"result": raw, "type": "text"}
 
         tokens_input = 0
@@ -222,10 +232,7 @@ def run_claude_code_fix(
                     "description": "Claude Code applied changes",
                 })
 
-        success = (
-            result.returncode == 0
-            and not (isinstance(data, dict) and data.get("is_error", False))
-        )
+        success = not (isinstance(data, dict) and data.get("is_error", False))
 
         return {
             "success": success,
