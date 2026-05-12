@@ -596,6 +596,8 @@ def _print_agent_changes_panel(agent_result, repo_path: str, extra_manual: list 
     path_label = ""
     if agent_result.path_used == "brain_db_diff":
         path_label = "  ·  brain.db diff"
+    elif agent_result.path_used == "claude_code_cli":
+        path_label = f"  ·  Claude Code CLI · {agent_result.tokens_used:,} tokens"
     elif agent_result.tokens_used:
         path_label = f"  ·  {agent_result.tokens_used:,} tokens"
     console.print(Text(
@@ -645,8 +647,12 @@ def _print_shadow_agent_changes(
         console.print(t)
     console.print(sep)
 
-    path_label = "brain.db" if agent_result.path_used == "brain_db_diff" else \
-                 f"Claude API · {agent_result.tokens_used:,} tokens"
+    if agent_result.path_used == "brain_db_diff":
+        path_label = "brain.db"
+    elif agent_result.path_used == "claude_code_cli":
+        path_label = f"Claude Code CLI · {agent_result.tokens_used:,} tokens"
+    else:
+        path_label = f"Claude API · {agent_result.tokens_used:,} tokens"
     total = len(changes) + len(extra_manual)
     console.print(Text(
         f"  {total} change(s) would be applied · {path_label}",
@@ -876,8 +882,12 @@ def main() -> int:
             agent_result = loop_result.final_result
             if agent_result.success:
                 n = len(agent_result.changes_applied) + len(shadow_manual_preview)
-                path_label = "brain.db" if agent_result.path_used == "brain_db_diff" \
-                             else f"Claude API · {agent_result.tokens_used:,} tokens"
+                if agent_result.path_used == "brain_db_diff":
+                    path_label = "brain.db"
+                elif agent_result.path_used == "claude_code_cli":
+                    path_label = f"Claude Code CLI · {agent_result.tokens_used:,} tokens"
+                else:
+                    path_label = f"Claude API · {agent_result.tokens_used:,} tokens"
                 _step_warn(f"shadow — {n} change(s) would apply · {path_label}")
             else:
                 total = len(candidates) + len(shadow_manual_preview)
@@ -947,6 +957,8 @@ def main() -> int:
                 n = len(agent_result.changes_applied)
                 if agent_result.path_used == "brain_db_diff":
                     path_label = "brain.db"
+                elif agent_result.path_used == "claude_code_cli":
+                    path_label = f"Claude Code CLI · {agent_result.tokens_used:,} tokens"
                 else:
                     path_label = f"Claude API · {agent_result.tokens_used:,} tokens"
                 detail = f"{n} change{'s' if n != 1 else ''} · {path_label}"
